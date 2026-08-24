@@ -787,12 +787,16 @@ def process_other_parts(part_name, parts_config_dict, parts_info_output_path):
         parts_info_file = os.path.join(parts_info_output_path,
                                        part_name + ".json")
         if part_name == 'hisysevent_config':
+            check_changes = True
             parts_info_file = os.path.join(parts_info_output_path,
                                            'hisysevent_configs' + ".json")
+        else:
+            check_changes = False
         if part_name == 'parts_inner_kits_info':
             parts_info_file = os.path.join(parts_info_output_path,
                                            'inner_kits_info' + ".json")
-        write_json_file(parts_info_file, parts_info)
+        write_json_file(parts_info_file, parts_info,
+                        check_changes=check_changes)
         LogUtil.hb_info("generate '{}' info to '{}'".format(part_name,
                                                             parts_info_file), mode=Config.log_mode)
 
