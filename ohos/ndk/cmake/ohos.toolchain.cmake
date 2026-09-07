@@ -182,6 +182,7 @@ if(DEFINED OHOS_COMPATIBLE_SDK_VERSION)
   if(NOT OHOS_C_COMPILER_FLAGS MATCHES "-Werror=unguarded-availability")
     list(APPEND OHOS_C_COMPILER_FLAGS
       -Wunguarded-availability)
+  endif()
 endif()
 
 if (OHOS_ENABLE_HWASAN STREQUAL ON AND OHOS_ARCH STREQUAL arm64-v8a)
