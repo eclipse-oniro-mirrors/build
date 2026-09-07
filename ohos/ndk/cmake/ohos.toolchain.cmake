@@ -179,8 +179,10 @@ if(OHOS_ENABLE_ASAN STREQUAL ON)
 	endif()
 endif()
 if(DEFINED OHOS_COMPATIBLE_SDK_VERSION)
-  list(APPEND OHOS_C_COMPILER_FLAGS
-    -Wunguarded-availability)
+  if(NOT (OHOS_C_COMPILER_FLAGS MATCHES "-Werror=unguarded-availability" OR
+	  CMAKE_C_FLAGS MATCHES "-Werror=unguarded-availability"))
+    list(APPEND OHOS_C_COMPILER_FLAGS
+      -Wunguarded-availability)
 endif()
 
 if (OHOS_ENABLE_HWASAN STREQUAL ON AND OHOS_ARCH STREQUAL arm64-v8a)
