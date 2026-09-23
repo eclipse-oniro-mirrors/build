@@ -257,7 +257,7 @@ lockfile=false
         [
             npm_tool_path,
             "install",
-            "@ohos/hpm-cli",
+            "@ohos/hpm-cli@1.7.0",
             "--registry",
             "https://repo.huaweicloud.com/repository/npm/",
             "--prefix",
