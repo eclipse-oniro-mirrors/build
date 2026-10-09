@@ -303,7 +303,8 @@ template("ohos_executable") {
   }
 
   if (_raceguard_apply) {
-    config("${target_name}_raceguard_config") {
+    _raceguard_config_target = "${target_name}_raceguard_config"
+    config(_raceguard_config_target) {
       cflags = [ "-fpass-plugin=${clang_checker_plugin_path}" ]
     }
   }
@@ -562,7 +563,7 @@ template("ohos_executable") {
     }
 
     if (_raceguard_apply) {
-      configs += [ ":${target_name}_raceguard_config" ]
+      configs += [ ":${_raceguard_config_target}" ]
       if (defined(external_deps)) {
         external_deps += [ "hiview:libdatarace_checker_rt" ]
       } else {
@@ -1056,7 +1057,8 @@ template("ohos_shared_library") {
   }
 
   if (_raceguard_apply) {
-    config("${target_name}_raceguard_config") {
+    _raceguard_config_target = "${target_name}_raceguard_config"
+    config(_raceguard_config_target) {
       cflags = [ "-fpass-plugin=${clang_checker_plugin_path}" ]
     }
   }
@@ -1426,7 +1428,7 @@ template("ohos_shared_library") {
     }
 
     if (_raceguard_apply) {
-      configs += [ ":${target_name}_raceguard_config" ]
+      configs += [ ":${_raceguard_config_target}" ]
       if (defined(external_deps)) {
         external_deps += [ "hiview:libdatarace_checker_rt" ]
       } else {
@@ -1677,7 +1679,8 @@ template("ohos_static_library") {
   }
 
   if (_raceguard_apply) {
-    config("${target_name}_raceguard_config") {
+    _raceguard_config_target = "${target_name}_raceguard_config"
+    config(_raceguard_config_target) {
       cflags = [ "-fpass-plugin=${clang_checker_plugin_path}" ]
     }
   }
@@ -1886,7 +1889,7 @@ template("ohos_static_library") {
     }
 
     if (_raceguard_apply) {
-      configs += [ ":${target_name}_raceguard_config" ]
+      configs += [ ":${_raceguard_config_target}" ]
     }
 
     deps_info = []
@@ -2035,7 +2038,8 @@ template("ohos_source_set") {
   }
 
   if (_raceguard_apply) {
-    config("${target_name}_raceguard_config") {
+    _raceguard_config_target = "${target_name}_raceguard_config"
+    config(_raceguard_config_target) {
       cflags = [ "-fpass-plugin=${clang_checker_plugin_path}" ]
     }
   }
@@ -2234,7 +2238,7 @@ template("ohos_source_set") {
     }
 
     if (_raceguard_apply) {
-      configs += [ ":${target_name}_raceguard_config" ]
+      configs += [ ":${_raceguard_config_target}" ]
     }
 
     deps_info = []
