@@ -24,6 +24,36 @@ declare_args() {
   # Compile with no sanitize check, for local debug only
   allow_sanitize_debug = false
   build_framework_pac_configs_policy = "basic"
+
+  # Enable clang raceguard checker plugin
+  use_clang_checker = false
+
+  # Path to the clang checker plugin (.so), used when use_clang_checker=true.
+  # Can be an absolute path or a filename resolvable via compiler library search paths.
+  clang_checker_plugin_path = "OurCheckerPass.so"
+}
+
+# Raceguard checker ban lists loaded once at file scope.
+# A target is banned from the checker if its subsystem_name appears in
+# _raceguard_ban_subsystem_name OR its part_name appears in
+# _raceguard_ban_part_name.
+_raceguard_ban_subsystem_name = []
+_raceguard_ban_part_name = []
+
+if (use_clang_checker && is_ohos) {
+  _raceguard_config_file = "${product_path}/build/config/raceguard_config.json"
+  _raceguard_config_exist =
+    exec_script(rebase_path("//build/scripts/check_file_exist.py"),
+                [ rebase_path(_raceguard_config_file) ], "string")
+  if (_raceguard_config_exist != "") {
+    _raceguard_config = read_file(_raceguard_config_file, "json")
+    if (defined(_raceguard_config.ban_subsystem_name)) {
+      _raceguard_ban_subsystem_name = _raceguard_config.ban_subsystem_name
+    }
+    if (defined(_raceguard_config.ban_part_name)) {
+      _raceguard_ban_part_name = _raceguard_config.ban_part_name
+    }
+  }
 }
 
 default_opt_configs = [
@@ -263,6 +293,19 @@ template("ohos_executable") {
 
   if (!defined(invoker.stable)) {
     stable = false
+  }
+
+  _raceguard_apply = false
+  if (use_clang_checker && is_ohos) {
+    _raceguard_apply =
+      (filter_include(_raceguard_ban_subsystem_name, [ subsystem_name ]) == []) &&
+      (filter_include(_raceguard_ban_part_name, [ part_name ]) == [])
+  }
+
+  if (_raceguard_apply) {
+    config("${target_name}_raceguard_config") {
+      cflags = [ "-fpass-plugin=${clang_checker_plugin_path}" ]
+    }
   }
 
   executable("${target_name}") {
@@ -517,6 +560,16 @@ template("ohos_executable") {
         }
       }
     }
+
+    if (_raceguard_apply) {
+      configs += [ ":${target_name}_raceguard_config" ]
+      if (defined(external_deps)) {
+        external_deps += [ "hiview:libdatarace_checker_rt" ]
+      } else {
+        external_deps = [ "hiview:libdatarace_checker_rt" ]
+      }
+    }
+
     if (target_toolchain == "${current_toolchain}") {
       install_module_info = {
         module_def = target_label
@@ -995,6 +1048,19 @@ template("ohos_shared_library") {
     write_file("${kernel_permission_info_file}", kernel_permission_info, "json")
   }
 
+  _raceguard_apply = false
+  if (use_clang_checker && is_ohos) {
+    _raceguard_apply =
+      (filter_include(_raceguard_ban_subsystem_name, [ subsystem_name ]) == []) &&
+      (filter_include(_raceguard_ban_part_name, [ part_name ]) == [])
+  }
+
+  if (_raceguard_apply) {
+    config("${target_name}_raceguard_config") {
+      cflags = [ "-fpass-plugin=${clang_checker_plugin_path}" ]
+    }
+  }
+
   shared_library("${target_name}") {
     forward_variables_from(invoker,
                            "*",
@@ -1359,6 +1425,15 @@ template("ohos_shared_library") {
       include_dirs = []
     }
 
+    if (_raceguard_apply) {
+      configs += [ ":${target_name}_raceguard_config" ]
+      if (defined(external_deps)) {
+        external_deps += [ "hiview:libdatarace_checker_rt" ]
+      } else {
+        external_deps = [ "hiview:libdatarace_checker_rt" ]
+      }
+    }
+
     install_module_info = {
       module_def = target_label
       module_info_file =
@@ -1594,6 +1669,19 @@ template("ohos_static_library") {
     }
   }
 
+  _raceguard_apply = false
+  if (use_clang_checker && is_ohos) {
+    _raceguard_apply =
+      (filter_include(_raceguard_ban_subsystem_name, [ subsystem_name ]) == []) &&
+      (filter_include(_raceguard_ban_part_name, [ part_name ]) == [])
+  }
+
+  if (_raceguard_apply) {
+    config("${target_name}_raceguard_config") {
+      cflags = [ "-fpass-plugin=${clang_checker_plugin_path}" ]
+    }
+  }
+
   static_library(target_name) {
     forward_variables_from(invoker,
                            "*",
@@ -1797,6 +1885,10 @@ template("ohos_static_library") {
       }
     }
 
+    if (_raceguard_apply) {
+      configs += [ ":${target_name}_raceguard_config" ]
+    }
+
     deps_info = []
     foreach(dep, deps) {
       info = {
@@ -1932,6 +2024,19 @@ template("ohos_source_set") {
       module_type = "source_set"
       module_name = _main_target_name
       module_source_dir = get_label_info(":${_main_target_name}", "dir")
+    }
+  }
+
+  _raceguard_apply = false
+  if (use_clang_checker && is_ohos) {
+    _raceguard_apply =
+      (filter_include(_raceguard_ban_subsystem_name, [ subsystem_name ]) == []) &&
+      (filter_include(_raceguard_ban_part_name, [ part_name ]) == [])
+  }
+
+  if (_raceguard_apply) {
+    config("${target_name}_raceguard_config") {
+      cflags = [ "-fpass-plugin=${clang_checker_plugin_path}" ]
     }
   }
 
@@ -2126,6 +2231,10 @@ template("ohos_source_set") {
           configs += debug_level_configs
         }
       }
+    }
+
+    if (_raceguard_apply) {
+      configs += [ ":${target_name}_raceguard_config" ]
     }
 
     deps_info = []
