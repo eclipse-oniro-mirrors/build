@@ -1890,6 +1890,11 @@ template("ohos_static_library") {
 
     if (_raceguard_apply) {
       configs += [ ":${_raceguard_config_target}" ]
+      if (defined(external_deps)) {
+        external_deps += [ "hiview:libdatarace_checker_rt" ]
+      } else {
+        external_deps = [ "hiview:libdatarace_checker_rt" ]
+      }
     }
 
     deps_info = []
@@ -2239,6 +2244,11 @@ template("ohos_source_set") {
 
     if (_raceguard_apply) {
       configs += [ ":${_raceguard_config_target}" ]
+      if (defined(external_deps)) {
+        external_deps += [ "hiview:libdatarace_checker_rt" ]
+      } else {
+        external_deps = [ "hiview:libdatarace_checker_rt" ]
+      }
     }
 
     deps_info = []
