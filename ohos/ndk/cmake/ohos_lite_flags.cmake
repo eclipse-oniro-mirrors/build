@@ -104,6 +104,8 @@ set(OHOS_COMMON_LINKER_FLAGS
   -L"${OHOS_SDK_NATIVE_LIB_PATH}"
   -Wl,--no-undefined
   -Wl,-lc
+  -Wl,-ldevice_meta_ndk
+  -Wl,-lworkout_sensor_ndk
   )
 
 string(REPLACE ";" " " OHOS_COMMON_LINKER_FLAGS "${OHOS_COMMON_LINKER_FLAGS}")
