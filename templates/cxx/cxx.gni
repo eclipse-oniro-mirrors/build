@@ -40,7 +40,7 @@ declare_args() {
 _raceguard_ban_subsystem_name = []
 _raceguard_ban_part_name = []
 
-if (use_clang_checker && is_ohos) {
+if (use_clang_checker && is_clang && is_ohos) {
   _raceguard_config_file = "${product_path}/build/config/raceguard_config.json"
   _raceguard_config_exist =
     exec_script(rebase_path("//build/scripts/check_file_exist.py"),
@@ -296,10 +296,11 @@ template("ohos_executable") {
   }
 
   _raceguard_apply = false
-  if (use_clang_checker && is_ohos) {
+  if (use_clang_checker && is_clang && is_ohos) {
     _raceguard_apply =
-      (filter_include(_raceguard_ban_subsystem_name, [ subsystem_name ]) == []) &&
-      (filter_include(_raceguard_ban_part_name, [ part_name ]) == [])
+      (filter_include([ subsystem_name ],
+                      _raceguard_ban_subsystem_name) == []) &&
+      (filter_include([ part_name ], _raceguard_ban_part_name) == [])
   }
 
   if (_raceguard_apply) {
@@ -1050,10 +1051,11 @@ template("ohos_shared_library") {
   }
 
   _raceguard_apply = false
-  if (use_clang_checker && is_ohos) {
+  if (use_clang_checker && is_clang && is_ohos) {
     _raceguard_apply =
-      (filter_include(_raceguard_ban_subsystem_name, [ subsystem_name ]) == []) &&
-      (filter_include(_raceguard_ban_part_name, [ part_name ]) == [])
+      (filter_include([ subsystem_name ],
+                      _raceguard_ban_subsystem_name) == []) &&
+      (filter_include([ part_name ], _raceguard_ban_part_name) == [])
   }
 
   if (_raceguard_apply) {
@@ -1672,10 +1674,11 @@ template("ohos_static_library") {
   }
 
   _raceguard_apply = false
-  if (use_clang_checker && is_ohos) {
+  if (use_clang_checker && is_clang && is_ohos) {
     _raceguard_apply =
-      (filter_include(_raceguard_ban_subsystem_name, [ subsystem_name ]) == []) &&
-      (filter_include(_raceguard_ban_part_name, [ part_name ]) == [])
+      (filter_include([ subsystem_name ],
+                      _raceguard_ban_subsystem_name) == []) &&
+      (filter_include([ part_name ], _raceguard_ban_part_name) == [])
   }
 
   if (_raceguard_apply) {
@@ -2036,10 +2039,11 @@ template("ohos_source_set") {
   }
 
   _raceguard_apply = false
-  if (use_clang_checker && is_ohos) {
+  if (use_clang_checker && is_clang && is_ohos) {
     _raceguard_apply =
-      (filter_include(_raceguard_ban_subsystem_name, [ subsystem_name ]) == []) &&
-      (filter_include(_raceguard_ban_part_name, [ part_name ]) == [])
+      (filter_include([ subsystem_name ],
+                      _raceguard_ban_subsystem_name) == []) &&
+      (filter_include([ part_name ], _raceguard_ban_part_name) == [])
   }
 
   if (_raceguard_apply) {
