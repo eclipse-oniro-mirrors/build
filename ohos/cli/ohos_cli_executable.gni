@@ -106,6 +106,9 @@ template("ohos_cli_executable") {
     outputs = [ _config_installed_output ]
     module_type = "etc"
     install_enable = true
+    if (defined(invoker.install_enable)) {
+      install_enable = invoker.install_enable
+    }
     module_install_dir = "bin/cli_tool/configs"
     module_install_name = "${_tool_name}.json"
   }
