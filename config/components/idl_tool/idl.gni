@@ -32,6 +32,7 @@ if (host_cpu == "arm64") {
   toolchain_mac = "$build_root/toolchain/mac:clang_x64"
 }
 toolchain_win = "$build_root/toolchain/mingw:mingw_x86_64"
+toolchain_ohos = "$build_root/toolchain/ohos:ohos_clang_arm64"
 
 if (host_toolchain == toolchain_mac) {
   idl_out_root = get_label_info("$idl_root:idl($toolchain_mac)", "root_out_dir")
@@ -39,6 +40,9 @@ if (host_toolchain == toolchain_mac) {
 } else if (host_toolchain == toolchain_win) {
   idl_out_root = get_label_info("$idl_root:idl($toolchain_win)", "root_out_dir")
   idl_build_deps = [ "$idl_root:idl($toolchain_win)" ]
+} else if (host_toolchain == toolchain_ohos) {
+  idl_out_root = get_label_info("$idl_root:idl($toolchain_ohos)", "root_out_dir")
+  idl_build_deps = [ "$idl_root:idl($toolchain_ohos)" ]
 } else {
   idl_out_root =
       get_label_info("$idl_root:idl($toolchain_linux)", "root_out_dir")

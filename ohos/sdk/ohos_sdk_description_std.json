@@ -1649,6 +1649,7 @@
             "linux",
             "windows",
             "darwin",
+            "ohos",
             "linux_arm64"
         ]
     },
