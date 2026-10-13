@@ -308,6 +308,16 @@
     },
     {
         "install_dir": "ets/static/build-tools/ets2panda/bin",
+        "module_label": "//arkcompiler/ets_frontend/ets2panda/staexpr2abc:ark_staexpr2abc",
+        "target_os": [
+            "linux",
+            "windows",
+            "darwin",
+            "linux_arm64"
+        ]
+    },
+    {
+        "install_dir": "ets/static/build-tools/ets2panda/bin",
         "module_label": "//arkcompiler/runtime_core/static_core/static_linker:ark_link",
         "target_os": [
             "linux",
