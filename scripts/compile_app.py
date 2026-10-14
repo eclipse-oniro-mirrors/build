@@ -273,14 +273,22 @@ def get_hvigor_home_from_config(model_version, config):
     major_version = parts[0]
     minor_version = parts[1] if len(parts) > 1 else None
     if model_version in config:
-        return config[model_version].get('hvigor_home'), config[model_version].get('nodejs_version')
-    key = f"{major_version}.x"
-    if key in config:
-        specific_config = config[key].get(model_version, {})
-        if 'hvigor_home' in specific_config:
-            return specific_config['hvigor_home'], specific_config['nodejs_version']
-        return config[key].get('default', {}).get('hvigor_home'), config[key].get('default', {}).get('nodejs_version')
-    return None, None
+        config_hvigor_home = config[model_version].get("hvigor_home")
+        config_nodejs_version = config[model_version].get("nodejs_version")
+    else:
+        key = f"{major_version}.x"
+        if key in config:
+            specific_config = config[key].get(model_version, {})
+            if "hvigor_home" in specific_config:
+                config_hvigor_home = specific_config.get("hvigor_home")
+                config_nodejs_version = specific_config.get("nodejs_version")
+            else:
+                config_hvigor_home = config[key].get("default", {}).get("hvigor_home")
+                config_nodejs_version = config[key].get("default", {}).get("nodejs_version")
+        else:
+            config_hvigor_home = None
+            config_nodejs_version = None
+    return config_hvigor_home, config_nodejs_version
 
 
 def get_node_path(nodejs_home_config: str, options):
