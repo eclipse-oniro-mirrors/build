@@ -191,8 +191,7 @@ class OHOSLoader(LoadInterface):
                     and component not in add_parts:
                 del new_components_data[component]
         self._merge_components_info(new_components_data)
-        os.remove(self.components_file)
-        write_json_file(self.components_file, new_components_data)
+        write_json_file(self.components_file, new_components_data, check_changes=True)
         
 
 # check method
