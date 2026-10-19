@@ -83,7 +83,11 @@ def write_json_file(output_file, content, check_changes=False):
 def __check_changes(output_file, content):
     if not os.path.isfile(output_file):
         return True
-    return read_json_file(output_file) != content
+    try:
+        return read_json_file(output_file) != content
+    except json.decoder.JSONDecodeError:
+        # Rewrite malformed generated output left by an interrupted build.
+        return True
 
 
 # Write file data
