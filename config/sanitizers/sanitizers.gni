@@ -150,8 +150,9 @@ if (use_raceguard) {
           defined(_raceguard_product_config.plugin_name) &&
           _raceguard_product_config.plugin_name != ""
     }
-  }
-  if (!_raceguard_plugin_configured) {
+    assert(_raceguard_plugin_configured,
+           "raceguard is not enabled because it is not configured")
+  } else {
     use_raceguard = false
   }
 }
