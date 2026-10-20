@@ -1668,6 +1668,13 @@
         ]
     },
     {
+        "install_dir": "ets/dynamic/build-tools/ets-loader/bin/ark/build/bin",
+        "module_label": "//foundation/filemanagement/file_api/interfaces/kits/js/preview:fs",
+        "target_os": [
+            "linux"
+        ]
+    },
+    {
         "install_dir": "ets/dynamic/build-tools/ets-loader/bin/ark/build-mac/bin",
         "module_label": "//arkcompiler/ets_runtime/ecmascript/sdk:copy_ark_aot_compiler_library_darwin",
         "target_os": [
