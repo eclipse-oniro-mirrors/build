@@ -1100,7 +1100,9 @@ class BuildArgsResolver(ArgsResolverInterface):
                             config.root_path,
                             "developtools/integration_verification/tools/oskm"))
                         from oskm_collect import oskm_collect
-                        oskm_collect(config.out_path, config.target_cpu)
+                        oskm_collect(config.out_path, config.target_cpu,
+                                     workspace_root=config.root_path,
+                                     product=config.product)
 
     # PlaceHolder
     @staticmethod
