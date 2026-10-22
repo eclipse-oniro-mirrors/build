@@ -264,6 +264,8 @@ class Product():
                 build_vars['build_selinux'] = config.get('build_selinux')
             if 'build_seccomp' in config:
                 build_vars['build_seccomp'] = config.get('build_seccomp')
+            if 'enable_bundle_config_check' in config:
+                build_vars['enable_bundle_config_check'] = config.get('enable_bundle_config_check')
             if 'support_jsapi' in config:
                 build_vars['support_jsapi'] = config.get('support_jsapi')
             if 'chipprod_config_path' in config:
