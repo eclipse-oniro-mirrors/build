@@ -234,6 +234,8 @@ template("build_ext_component") {
     if (defined(invoker.outputs)) {
       outputs += invoker.outputs
     }
+    out_stamp = rebase_path(outputs[0])
+    args += [ "--out_stamp=${out_stamp}" ]
   }
 }
 

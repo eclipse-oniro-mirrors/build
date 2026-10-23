@@ -21,6 +21,7 @@ import os
 import sys
 import shutil
 import argparse
+from pathlib import Path
 sys.path.append(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 from hb.resources.config import Config
@@ -84,7 +85,11 @@ class Packer():
         for lib in libs:
             source_file = os.path.join(src_path, lib)
             target_file = os.path.join(target_path, lib)
-            shutil.move(source_file, target_file)
+            # Copy (not move): the out-root lib*.so files are declared
+            # outputs of the ext-component edges and must stay in place,
+            # otherwise the packer and ext edges keep re-triggering each
+            # other on every build (mv -> dirty ext -> cp back -> mv ...).
+            shutil.copy2(source_file, target_file)
 
     def create_fs_dirs(self):
         fs_path = os.path.join(self.config.out_path,
@@ -248,3 +253,11 @@ if __name__ == "__main__":
         r'${product_path}': args.product_path
     }
     packer.fs_make('')
+
+    # GN declares result.txt as the output of the packer action; create
+    # (or refresh the mtime of) this stamp file on every successful run
+    # so the ninja edge converges instead of staying permanently dirty
+    # (which made mv_usr_libs move every lib*.so out of the out root).
+    result_path = os.path.join(args.out_path, 'result.txt')
+    Path(result_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(result_path).touch()
