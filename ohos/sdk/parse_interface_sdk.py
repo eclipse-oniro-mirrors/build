@@ -18,6 +18,8 @@ import os
 import sys
 import shutil
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from convert_permissions import convert_permissions
 
 OUT_ROOT_LIST = ["dynamic/sdk-js",
@@ -118,6 +120,7 @@ def remove_system_api_method(source_root: str, out_path: str, nodejs: str, sdk_t
                           api_out_dir, "--type", sdk_type, "--build-sdk-path", build_sdk_path], stdout=subprocess.PIPE)
     p.wait()
 
+
 def adjust_annotation_method(source_root: str, out_path: str, nodejs: str):
     tool = os.path.join(source_root, INTERFACE_PATH, API_MODIFY_DIR, ANNOTATION_MODIFY_TOOL)
     tool = os.path.abspath(tool)
@@ -130,6 +133,7 @@ def adjust_annotation_method(source_root: str, out_path: str, nodejs: str):
     p = subprocess.Popen([nodejs, tool, "--input", api_dir, "--output",
                           api_out_dir], stdout=subprocess.PIPE)
     p.wait()
+
 
 def change_int_to_number(source_root: str, out_path: str, nodejs: str, sdk_type: str):
     tool = os.path.join(source_root, INTERFACE_PATH,
@@ -151,50 +155,52 @@ def change_int_to_number(source_root: str, out_path: str, nodejs: str, sdk_type:
         process_obj.wait()
 
 
-def parse_step(options):
-    for i, out_path in enumerate(OUT_ROOT_LIST):
-        sdk_type = OUT_SDK_TYPE[i]
-        permission_file = OUT_PERMISSION_FILE[i]
-        out_path = os.path.join(options.output_interface_sdk, out_path)
-        out_path = os.path.relpath(out_path, options.root_build_dir)
-        copy_arkts_api_method(options.root_build_dir, out_path, options.node_js, sdk_type, options.sdk_build_public,
-                              options.sdk_build_arkts)
+def parse_single_step(options, i):
+    sdk_type = OUT_SDK_TYPE[i]
+    permission_file = OUT_PERMISSION_FILE[i]
+    out_path = os.path.join(options.output_interface_sdk, OUT_ROOT_LIST[i])
+    out_path = os.path.relpath(out_path, options.root_build_dir)
+    copy_arkts_api_method(options.root_build_dir, out_path, options.node_js, sdk_type, options.sdk_build_public,
+                          options.sdk_build_arkts)
+    # 转换sdk_build_check_level为数值int类型，防止传入有误参数
+    sdk_build_check_level = 0
+    try:
+        sdk_build_check_level = int(options.sdk_build_check_level)
+    except BaseException as e:
+        raise ValueError("sdk_build_check_level数值有误，请传入正确数值") from e
+    if sdk_build_check_level != 0:
+        # 仅在编译dynamic时校验API版本
+        check_api_version_method(options.root_build_dir, out_path, options.sdk_api_version, options.node_js)
 
-        # 转换sdk_build_check_level为数值int类型，防止传入有误参数
-        sdk_build_check_level = 0
-        try:
-            sdk_build_check_level = int(options.sdk_build_check_level)
-        except BaseException as e:
-            raise ValueError("sdk_build_check_level数值有误，请传入正确数值")
-        if sdk_build_check_level != 0:
-            # 仅在编译dynamic时校验API版本
-            check_api_version_method(options.root_build_dir, out_path, options.sdk_api_version, options.node_js)
-
-        if options.sdk_build_public == "true":
-            remove_system_api_method(
-                options.root_build_dir, out_path, options.node_js, sdk_type, options.build_sdk_path)
-            replace_sdk_dir(options.root_build_dir, os.path.join(
-                out_path, API_GEN_PATH), os.path.join(out_path, API_PATH))
-            replace_sdk_dir(options.root_build_dir, os.path.join(
-                out_path, KITS_GEN_PATH), os.path.join(out_path, KITS_PATH))
-            replace_sdk_dir(options.root_build_dir, os.path.join(
-                out_path, ARKTS_GEN_PATH), os.path.join(out_path, ARKTS_PATH))
-        adjust_annotation_method(
-            options.root_build_dir, out_path, options.node_js)
+    if options.sdk_build_public == "true":
+        remove_system_api_method(
+            options.root_build_dir, out_path, options.node_js, sdk_type, options.build_sdk_path)
         replace_sdk_dir(options.root_build_dir, os.path.join(
             out_path, API_GEN_PATH), os.path.join(out_path, API_PATH))
         replace_sdk_dir(options.root_build_dir, os.path.join(
+            out_path, KITS_GEN_PATH), os.path.join(out_path, KITS_PATH))
+        replace_sdk_dir(options.root_build_dir, os.path.join(
             out_path, ARKTS_GEN_PATH), os.path.join(out_path, ARKTS_PATH))
-        convert_permissions(options.root_build_dir, out_path,
-            permission_file, options.node_js)
+    adjust_annotation_method(options.root_build_dir, out_path, options.node_js)
+    replace_sdk_dir(options.root_build_dir, os.path.join(
+        out_path, API_GEN_PATH), os.path.join(out_path, API_PATH))
+    replace_sdk_dir(options.root_build_dir, os.path.join(
+        out_path, ARKTS_GEN_PATH), os.path.join(out_path, ARKTS_PATH))
+    convert_permissions(options.root_build_dir, out_path, permission_file, options.node_js)
+    if sdk_type == "ets":
+        change_int_to_number(
+            options.root_build_dir, out_path, options.node_js, sdk_type)
+        replace_sdk_dir(options.root_build_dir, os.path.join(
+            out_path, TYPE_CHANGE_API_GEN_PATH), os.path.join(out_path, API_PATH))
+        replace_sdk_dir(options.root_build_dir, os.path.join(
+            out_path, TYPE_CHANGE_ARKTS_GEN_PATH), os.path.join(out_path, ARKTS_PATH))
 
-        if sdk_type == "ets":
-            change_int_to_number(
-                options.root_build_dir, out_path, options.node_js, sdk_type)
-            replace_sdk_dir(options.root_build_dir, os.path.join(
-                out_path, TYPE_CHANGE_API_GEN_PATH), os.path.join(out_path, API_PATH))
-            replace_sdk_dir(options.root_build_dir, os.path.join(
-                out_path, TYPE_CHANGE_ARKTS_GEN_PATH), os.path.join(out_path, ARKTS_PATH))
+
+def parse_step(options):
+    with ThreadPoolExecutor(max_workers=len(OUT_ROOT_LIST)) as executor:
+        future = [executor.submit(parse_single_step, options, i) for i in range(len(OUT_ROOT_LIST))]
+        for f in future:
+            f.result()  # 等待任务完成并获取结果
 
 
 def main():
