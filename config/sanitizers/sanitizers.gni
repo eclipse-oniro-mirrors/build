@@ -130,25 +130,18 @@ declare_args() {
 }
 
 # Raceguard is opt-in per product and only valid for clang builds on ohos: it
-# is enabled only when the product's raceguard_config.json exists and
+# is enabled only when build/config/sanitizers/raceguard_config.json exists and
 # configures a plugin name. Otherwise force it off so no plugin flag or loader
 # change is applied.
 if (use_raceguard) {
   _raceguard_plugin_configured = false
   if (is_clang && is_ohos) {
-    # product_path is not declared in every scope that imports this file, so
-    # prefer it when present and otherwise fall back to the preloader config.
-    _raceguard_product_path = product_build_config.product_path
-    if (defined(product_path)) {
-      _raceguard_product_path = product_path
-    }
-    _raceguard_config_file =
-        "${_raceguard_product_path}/build/config/raceguard_config.json"
+    _raceguard_config_file = "//build/config/sanitizers/raceguard_config.json"
     if (path_exists(_raceguard_config_file)) {
-      _raceguard_product_config = read_file(_raceguard_config_file, "json")
+      _raceguard_config = read_file(_raceguard_config_file, "json")
       _raceguard_plugin_configured =
-          defined(_raceguard_product_config.plugin_name) &&
-          _raceguard_product_config.plugin_name != ""
+          defined(_raceguard_config.plugin_name) &&
+          _raceguard_config.plugin_name != ""
     }
     assert(_raceguard_plugin_configured,
            "raceguard is not enabled because it is not configured")
