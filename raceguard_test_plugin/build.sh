@@ -22,6 +22,9 @@
 #   ./build.sh --install       # build and install the plugin into $LLVM_DIR/lib
 #   ./build.sh --runtime       # build the reference __raceguard_test_probe runtime
 #   ./build.sh --install-runtime
+#   ./build.sh --install-config   # copy the test raceguard_config.json into the
+#                                 # build framework so use_raceguard takes effect
+#   ./build.sh --remove-config    # remove the copied test raceguard_config.json
 #
 # Environment overrides:
 #   LLVM_DIR      clang toolchain root
@@ -87,11 +90,19 @@ case "${1:-}" in
     build_runtime
     install_file "$OUT_DIR/$RUNTIME_NAME" "$LLVM_DIR/lib"
     ;;
+  --install-config)
+    install_file "$DIR/raceguard_config.json" \
+      "$ROOT/build/config/sanitizers"
+    ;;
+  --remove-config)
+    rm -f "$ROOT/build/config/sanitizers/raceguard_config.json"
+    echo "removed $ROOT/build/config/sanitizers/raceguard_config.json"
+    ;;
   "")
     build_plugin
     ;;
   *)
-    echo "usage: $0 [--install|--runtime|--install-runtime]" >&2
+    echo "usage: $0 [--install|--runtime|--install-runtime|--install-config|--remove-config]" >&2
     exit 1
     ;;
 esac

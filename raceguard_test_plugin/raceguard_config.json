@@ -1,0 +1,7 @@
+{
+  "plugin_name": "libclang_rt.raceguard-aarch64.so",
+  "ban_subsystem_name": [
+    "tests"
+  ],
+  "ban_part_name": []
+}
