@@ -136,8 +136,7 @@ declare_args() {
 if (use_raceguard) {
   _raceguard_plugin_configured = false
   if (is_clang && is_ohos) {
-    _raceguard_config_file =
-        "//build/config/sanitizers/raceguard_config.json"
+    _raceguard_config_file = "//build/config/sanitizers/raceguard_config.json"
     if (path_exists(_raceguard_config_file)) {
       _raceguard_config = read_file(_raceguard_config_file, "json")
       _raceguard_plugin_configured =
