@@ -77,7 +77,6 @@ def collect_notice_files(options, dest_dir: str, depfiles: str):
                 generate_notice_files(dest_dir, module_info, depfiles)
 
     notice_files = build_utils.get_all_files(options.notice_root_dir)
-    depfiles.extend(notice_files)
     for file in notice_files:
         dest = os.path.join(dest_dir,
                             os.path.relpath(file, options.notice_root_dir))
