@@ -16,7 +16,6 @@
 import json
 import os
 import subprocess
-import hashlib
 import platform
 
 
@@ -82,18 +81,13 @@ def write_json_file(output_file, content, check_changes=False):
 
 
 def __check_changes(output_file, content):
-    if os.path.exists(output_file) and os.path.isfile(output_file):
-        # file content md5 val
-        sha256_obj = hashlib.sha256()
-        sha256_obj.update(str(read_json_file(output_file)).encode())
-        hash_value = sha256_obj.hexdigest()
-        # new content md5 val
-        sha256_obj_new = hashlib.sha256()
-        sha256_obj_new.update(str(content).encode())
-        hash_value_new = sha256_obj_new.hexdigest()
-        if hash_value_new == hash_value:
-            return False
-    return True
+    if not os.path.isfile(output_file):
+        return True
+    try:
+        return read_json_file(output_file) != content
+    except json.decoder.JSONDecodeError:
+        # Rewrite malformed generated output left by an interrupted build.
+        return True
 
 
 # Write file data

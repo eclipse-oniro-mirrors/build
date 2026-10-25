@@ -104,13 +104,16 @@ def gen_output_file(part_name: str, origin_part_name: str, all_modules_file: str
     part_install_modules.extend(thirdparty_module_list)
     part_install_modules.extend(hdi_module_list)
     # write install modules file
-    write_json_file(install_modules_file, part_install_modules)
+    write_json_file(install_modules_file, part_install_modules,
+                    check_changes=True)
 
     # add no install modules to dict, example: host target
     modules_info_dict[part_name] = part_no_install_modules
     # write dep modules file
-    write_json_file(dep_modules_file, modules_info_dict)
-    write_json_file(output_host_file, part_host_modules)
+    write_json_file(dep_modules_file, modules_info_dict,
+                    check_changes=True)
+    write_json_file(output_host_file, part_host_modules,
+                    check_changes=True)
 
 
 def main():
