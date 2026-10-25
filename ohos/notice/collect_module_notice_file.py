@@ -59,12 +59,12 @@ def find_other_files(license_file_path):
 
 
 def find_file_recursively(current_dir: str, target_files: list):
-    if is_top_dir(current_dir):
-        return None
     for file in target_files:
         candidate = os.path.join(current_dir, file)
         if os.path.isfile(candidate):
             return candidate
+    if is_top_dir(current_dir):
+        return None
     return find_file_recursively(os.path.dirname(current_dir), target_files)
 
 

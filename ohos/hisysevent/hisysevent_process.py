@@ -101,12 +101,14 @@ def main(argv):
                                                     src_part_list,
                                                     args.source_root_dir,
                                                     args.gn_root_build_dir)
+    depfiles.extend(hisysevent_config_files)
 
     _output_path = os.path.dirname(args.hisysevent_install_info_file)
     install_info_list = _get_install_info(hisysevent_config_files,
                                           _output_path,
                                           args.config_install_dest_dir)
-    write_json_file(args.hisysevent_install_info_file, install_info_list)
+    write_json_file(args.hisysevent_install_info_file, install_info_list,
+                    check_changes=True)
     build_utils.write_depfile(args.depfile, args.hisysevent_install_info_file,
                               depfiles)
 

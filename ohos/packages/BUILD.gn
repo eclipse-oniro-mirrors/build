@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import("//build/config/ohos/copy_ex.gni")
 import("//build/config/python.gni")
 import("//build/ohos/sa_profile/sa_profile.gni")
 
@@ -161,23 +162,33 @@ foreach(_platform, target_platform_list) {
 
   _notice_root_dir = "${current_platform_dir}/NOTICE_FILES"
   _collected_notice_zipfile = "${current_platform_dir}/system_notice_files.zip"
+  _staged_notice_zipfile =
+      "$target_gen_dir/system_notice_files_${_platform}.zip"
 
-  action_with_pydeps("collect_notice_files__${_platform}") {
+  action_with_pydeps("stage_notice_files__${_platform}") {
     deps = [ ":${_platform}_parts_list" ]
     script = "//build/ohos/notice/collect_system_notice_files.py"
     depfile = "$target_gen_dir/$target_name.d"
     sources = [ _system_install_info_file ]
-    outputs = [ _collected_notice_zipfile ]
+    outputs = [ _staged_notice_zipfile ]
     args = [
       "--install-info-file",
       rebase_path(_system_install_info_file, root_build_dir),
       "--output-file",
-      rebase_path(_collected_notice_zipfile, root_build_dir),
+      rebase_path(_staged_notice_zipfile, root_build_dir),
       "--depfile",
       rebase_path(depfile, root_build_dir),
       "--notice-root-dir",
       rebase_path(_notice_root_dir, root_build_dir),
     ]
+  }
+
+  copy_ex("collect_notice_files__${_platform}") {
+    deps = [ ":stage_notice_files__${_platform}" ]
+    dest = current_platform_dir
+    renaming_sources = [ _staged_notice_zipfile ]
+    renaming_destinations = [ "system_notice_files.zip" ]
+    outputs = [ _collected_notice_zipfile ]
   }
 
   _merged_notice_txt = "${current_platform_dir}/NOTICE.txt"

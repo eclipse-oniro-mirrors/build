@@ -118,12 +118,36 @@ declare_args() {
   # The global switch of cfi debug mode.
   cfi_debug = false
 
+  # Enable clang raceguard checker plugin
+  use_raceguard = false
+
   # Policy of security-related compilation configs, based on device performance.
   #   "high":     High-load security policy enabled. Suitable for High-performance devices.
   #   "standard": Standard security policy enabled. Suitable for Mid-performance devices.
   #   "basic":    Basic security policy enabled. Suitable for Low-performance devices.
   #               High-load features like CFI are disabled with this value.
   build_framework_security_configs_policy = "high"
+}
+
+# Raceguard is opt-in per product and only valid for clang builds on ohos: it
+# is enabled only when build/config/sanitizers/raceguard_config.json exists and
+# configures a plugin name. Otherwise force it off so no plugin flag or loader
+# change is applied.
+if (use_raceguard) {
+  _raceguard_plugin_configured = false
+  if (is_clang && is_ohos) {
+    _raceguard_config_file = "//build/config/sanitizers/raceguard_config.json"
+    if (path_exists(_raceguard_config_file)) {
+      _raceguard_config = read_file(_raceguard_config_file, "json")
+      _raceguard_plugin_configured =
+          defined(_raceguard_config.plugin_name) &&
+          _raceguard_config.plugin_name != ""
+    }
+    assert(_raceguard_plugin_configured,
+           "raceguard is not enabled because it is not configured")
+  } else {
+    use_raceguard = false
+  }
 }
 
 is_v8_host_toolchain =

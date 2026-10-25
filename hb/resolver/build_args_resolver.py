@@ -1083,6 +1083,27 @@ class BuildArgsResolver(ArgsResolverInterface):
             executor.submit(SystemUtil.exec_command, cmd, log_path=config.log_path, log_stage='[postTargetGenerate]')
             executor.shutdown(wait=False)
 
+    @staticmethod
+    def resolve_enable_oskm_collect(target_arg: Arg, build_module: BuildModuleInterface):
+        """resolve '--enable-oskm-collect' arg
+        :param target_arg: arg object which is used to get arg value.
+        :param build_module [maybe unused]: build module object which is used to get other services.
+        :phase: postTargetCompilation.
+        """
+        for gn_arg in build_module.args_dict['gn_args'].arg_value:
+            if 'enable_oskm_collect' in gn_arg:
+                variable, value = gn_arg.split('=')
+                if str(value).strip().lower() == 'true':
+                    config = Config()
+                    if config.os_level == "standard" and config.compile_mode != 'host':
+                        sys.path.append(os.path.join(
+                            config.root_path,
+                            "developtools/integration_verification/tools/oskm"))
+                        from oskm_collect import oskm_collect
+                        oskm_collect(config.out_path, config.target_cpu,
+                                     workspace_root=config.root_path,
+                                     product=config.product)
+
     # PlaceHolder
     @staticmethod
     def resolve_compiler(target_arg: Arg, build_module: BuildModuleInterface):

@@ -26,6 +26,42 @@ declare_args() {
   build_framework_pac_configs_policy = "basic"
 }
 
+# Raceguard checker ban lists loaded once at file scope.
+# A target is banned from the checker if its subsystem_name appears in
+# _raceguard_ban_subsystem_name OR its part_name appears in
+# _raceguard_ban_part_name.
+_raceguard_ban_subsystem_name = []
+_raceguard_ban_part_name = []
+
+# Checker plugin name and runtime deps are read from
+# //build/config/sanitizers/raceguard_config.json. sanitizers.gni disables
+# use_raceguard when that config is missing or does not configure a plugin name.
+_raceguard_plugin_name = ""
+
+# Runtime dependency attached to every checked target. It is taken from the
+# raceguard_config.json ("external_deps") so products/branches whose parts do
+# not provide the raceguard runtime simply omit the field.
+_raceguard_runtime_deps = []
+
+if (use_raceguard) {
+  _raceguard_config_file = "//build/config/sanitizers/raceguard_config.json"
+  if (path_exists(_raceguard_config_file)) {
+    _raceguard_config = read_file(_raceguard_config_file, "json")
+    if (defined(_raceguard_config.plugin_name)) {
+      _raceguard_plugin_name = _raceguard_config.plugin_name
+    }
+    if (defined(_raceguard_config.ban_subsystem_name)) {
+      _raceguard_ban_subsystem_name = _raceguard_config.ban_subsystem_name
+    }
+    if (defined(_raceguard_config.ban_part_name)) {
+      _raceguard_ban_part_name = _raceguard_config.ban_part_name
+    }
+    if (defined(_raceguard_config.external_deps)) {
+      _raceguard_runtime_deps = _raceguard_config.external_deps
+    }
+  }
+}
+
 default_opt_configs = [
   "//build/config/compiler:default_symbols",
   "//build/config/compiler:default_optimization",
@@ -995,6 +1031,21 @@ template("ohos_shared_library") {
     write_file("${kernel_permission_info_file}", kernel_permission_info, "json")
   }
 
+  _raceguard_enabled = false
+  if (use_raceguard) {
+    _raceguard_enabled =
+      (filter_include([ subsystem_name ],
+                      _raceguard_ban_subsystem_name) == []) &&
+      (filter_include([ part_name ], _raceguard_ban_part_name) == [])
+  }
+
+  if (_raceguard_enabled) {
+    _raceguard_config_target = "${target_name}_raceguard_config"
+    config(_raceguard_config_target) {
+      cflags = [ "-fpass-plugin=${_raceguard_plugin_name}" ]
+    }
+  }
+
   shared_library("${target_name}") {
     forward_variables_from(invoker,
                            "*",
@@ -1357,6 +1408,15 @@ template("ohos_shared_library") {
     }
     if (!defined(include_dirs)) {
       include_dirs = []
+    }
+
+    if (_raceguard_enabled) {
+      configs += [ ":${_raceguard_config_target}" ]
+      if (defined(external_deps)) {
+        external_deps += _raceguard_runtime_deps
+      } else {
+        external_deps = _raceguard_runtime_deps
+      }
     }
 
     install_module_info = {
@@ -1935,6 +1995,21 @@ template("ohos_source_set") {
     }
   }
 
+  _raceguard_enabled = false
+  if (use_raceguard) {
+    _raceguard_enabled =
+      (filter_include([ subsystem_name ],
+                      _raceguard_ban_subsystem_name) == []) &&
+      (filter_include([ part_name ], _raceguard_ban_part_name) == [])
+  }
+
+  if (_raceguard_enabled) {
+    _raceguard_config_target = "${target_name}_raceguard_config"
+    config(_raceguard_config_target) {
+      cflags = [ "-fpass-plugin=${_raceguard_plugin_name}" ]
+    }
+  }
+
   source_set(target_name) {
     forward_variables_from(invoker,
                            "*",
@@ -2125,6 +2200,15 @@ template("ohos_source_set") {
           configs -= default_opt_configs
           configs += debug_level_configs
         }
+      }
+    }
+
+    if (_raceguard_enabled) {
+      configs += [ ":${_raceguard_config_target}" ]
+      if (defined(external_deps)) {
+        external_deps += _raceguard_runtime_deps
+      } else {
+        external_deps = _raceguard_runtime_deps
       }
     }
 

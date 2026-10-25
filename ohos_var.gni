@@ -428,6 +428,12 @@ declare_args() {
   make_pac_format_image = false
 }
 
+declare_args() {
+  # Enable oskm collection during the postTargetCompilation phase.
+  # Pass via: --gn-args enable_oskm_collect=true
+  enable_oskm_collect = false
+}
+
 python_script = "//build/scripts/is_substring.py"
 
 if (exec_script(python_script,
