@@ -407,7 +407,8 @@ class LoadBuildConfig(object):
                  config_output_dir, variant_toolchains, subsystem_name,
                  target_arch, ignored_subsystems, exclusion_modules_config_file,
                  dependency_pruning_config_file, load_test_config,
-                 overrided_components, bundle_subsystem_allow_list):
+                 overrided_components, bundle_subsystem_allow_list,
+                 enable_bundle_config_check=False):
         self._source_root_dir = source_root_dir
         self._build_info = subsystem_build_info
         self._config_output_relpath = config_output_dir
@@ -430,6 +431,7 @@ class LoadBuildConfig(object):
         self._load_test_config = load_test_config
         self._overrided_components = overrided_components
         self._bundle_subsystem_allow_list = bundle_subsystem_allow_list
+        self._enable_bundle_config_check = enable_bundle_config_check
 
     @throw_exception
     def _parsing_config(self, parts_config):
@@ -593,6 +595,38 @@ class LoadBuildConfig(object):
             key: value for key, value in self._parts_module_list.items() if key in save_part}
         self._parts_deps = {
             key: value for key, value in self._parts_deps.items() if key in save_part}
+    
+
+    def load_component_path_whitelist(self):
+        def _parse(raw):
+            result = {}
+            if isinstance(raw, list):
+                for _entry in raw:
+                    _cp = _entry.get("component_path", "")
+                    _mp = _entry.get("module_path", [])
+                    if _cp:
+                        result[_cp] = _mp
+            return result
+        return self._load_whitelist_file("component_path_whitelist.json", _parse)
+
+    def load_bundle_declare_external(self):
+        def _parse(raw):
+            if isinstance(raw, dict):
+                _bde = raw.get("bundle_declare_external", {})
+                if isinstance(_bde, dict):
+                    return _bde
+            return {}
+        return self._load_whitelist_file("component_compilation_whitelist.json", _parse)
+    
+    def _load_whitelist_file(self, file_name, parser):
+        _file = os.path.join(self._source_root_dir,
+                            "out/products_ext", file_name)
+        if not os.path.exists(_file):
+            _file = os.path.join(self._source_root_dir, "build", file_name)
+            if not os.path.exists(_file):
+                return {}
+        return parser(read_json_file(_file))
+
 
     def _merge_build_config(self):
         _build_files = self._build_info.get('build_files')
@@ -602,12 +636,19 @@ class LoadBuildConfig(object):
         subsystem_name = None
         parts_info = {}
         parts_path_dict = {}
+        _component_path_whitelist = self.load_component_path_whitelist()
+        _bundle_declare_external = self.load_bundle_declare_external()
+
         for _build_file in _build_files:
             if _build_file.endswith('bundle.json'):
                 bundle_part_obj = load_bundle_file.BundlePartObj(
                     _build_file, self._exclusion_modules_config_file,
                     self._dependency_pruning_config_file,
-                    self._load_test_config)
+                    self._load_test_config,
+                    component_path_whitelist=_component_path_whitelist,
+                    source_root_dir=self._source_root_dir,
+                    bundle_declare_external=_bundle_declare_external,
+                    enable_bundle_config_check=self._enable_bundle_config_check)
                 _parts_config = bundle_part_obj.to_ohos_build()
             else:
                 _parts_config = read_build_file(_build_file)
@@ -896,7 +937,8 @@ def get_parts_info(source_root_dir,
                    overrided_components,
                    bundle_subsystem_allow_list,
                    skip_partlist_check,
-                   build_xts=False):
+                   build_xts=False,
+                   enable_bundle_config_check=False):
     """parts info,
     get info from build config file.
     """
@@ -923,7 +965,8 @@ def get_parts_info(source_root_dir,
                                        exclusion_modules_config_file,
                                        dependency_pruning_config_file,
                                        load_test_config, overrided_components,
-                                       bundle_subsystem_allow_list)
+                                       bundle_subsystem_allow_list,
+                                       enable_bundle_config_check)
         # xts subsystem special handling, device_attest and
         # device_attest_lite parts need to be compiled into the version image, other parts are not.
         # parts_modules_info needs to be parse before filting.

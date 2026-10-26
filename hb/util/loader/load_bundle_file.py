@@ -23,11 +23,14 @@ from util.io_util import IoUtil
 from util.log_util import LogUtil
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.util import file_utils  # noqa: E402
+from util.log_util import LogUtil # noqa: E402
 
 
 class BundlePartObj(object):
     def __init__(self, bundle_config_file, exclusion_modules_config_file,
-                 dependency_pruning_config_file, load_test_config):
+                 dependency_pruning_config_file, load_test_config,
+                 component_path_whitelist=None, source_root_dir=None,
+                 bundle_declare_external=None, enable_bundle_config_check=False):
         self._build_config_file = bundle_config_file
         self._exclusion_modules_config_file = exclusion_modules_config_file
         self._dependency_pruning_config_file = dependency_pruning_config_file
@@ -35,6 +38,10 @@ class BundlePartObj(object):
         self._condition_context = self._build_condition_context()
         self._matched_condition_keys = set()
         self._loading_config()
+        self._component_path_whitelist = component_path_whitelist or {}
+        self._source_root_dir = source_root_dir
+        self._bundle_declare_external = bundle_declare_external or {}
+        self._enable_bundle_config_check = enable_bundle_config_check
 
     def _build_condition_context(self):
         config_info = {}
@@ -190,6 +197,7 @@ class BundlePartObj(object):
                         "{}, incorrect group type".format(_tip_info), "2011")
 
     def to_ohos_build(self):
+        self._validate_module_paths()
         _component_info = self.bundle_info.get('component')
         _subsystem_name = _component_info.get('subsystem')
         _part_name = _component_info.get('name')
@@ -265,3 +273,63 @@ class BundlePartObj(object):
 
         _ohos_build_info['parts'] = {_part_name: _part_info}
         return _ohos_build_info
+
+    def _collect_all_module_paths(self):
+        paths = []
+        build = self.bundle_info.get('component', {}).get('build', {})
+
+        for key in ('sub_component', 'modules'):
+            if key in build:
+                paths.extend(build[key])
+
+        if 'group_type' in build:
+            for group_list in build['group_type'].values():
+                paths.extend(group_list)
+
+        for kit_key in ('inner_kits', 'inner_api'):
+            if kit_key in build:
+                for kit in build[kit_key]:
+                    name = kit.get('name', '')
+                    if name:
+                        paths.append(name)
+
+        if 'test' in build:
+            paths.extend(build['test'])
+        return paths
+
+    def _validate_module_paths(self):
+        if not self._enable_bundle_config_check:
+            return
+        if not self._source_root_dir:
+            return
+        
+        dest_paths = [os.path.relpath(
+            os.path.dirname(self._build_config_file), self._source_root_dir)]
+
+        allowed_paths = list(dest_paths)
+        for dest_path in dest_paths:
+            if dest_path in self._component_path_whitelist:
+                allowed_paths.extend(self._component_path_whitelist[dest_path])
+        
+        all_paths = self._collect_all_module_paths()
+        part_name = self.bundle_info.get('component', {}).get('name', '')
+        subsystem = self.bundle_info.get('component', {}).get('subsystem', '')
+
+        for path in all_paths:
+            if not path:
+                continue
+            path_part = path.lstrip('/').split(':')[0]
+            if not path_part:
+                continue
+            is_valid = any(path_part == allowed or path_part.startswith('%s/' % allowed)
+                        for allowed in allowed_paths)
+            if not is_valid:
+                _external_list = self._bundle_declare_external.get(part_name, [])
+                if path in _external_list:
+                    continue
+                raise OHOSException(
+                    "Module path '{}' in '{}' does not belong to component "
+                    "'{}:{}' (destPath = '{}'). If this is a multi-repo component, "
+                    "add the path to component_path_whitelist.json.".format(
+                        path, self._build_config_file, subsystem, part_name,
+                        ','.join(dest_paths)), "2014")

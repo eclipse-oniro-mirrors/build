@@ -79,6 +79,8 @@ class OHOSLoader(LoadInterface):
             self.config.root_path, 'out/preloader', self.config.product, 'platforms.build')
         self.exclusion_modules_config_file = os.path.join(
             self.config.root_path, 'out/preloader', self.config.product, 'exclusion_modules.json')
+        self.build_config_json_file = os.path.join(
+            self.config.root_path, 'out/preloader', self.config.product, 'build_config.json')
         self.dependency_pruning_config_file = os.path.join(
             self.config.root_path, 'out/preloader', self.config.product, 'dependency_pruning.json')
         self.example_subsystem_file = os.path.join(
@@ -115,6 +117,12 @@ class OHOSLoader(LoadInterface):
             self.source_root_dir,
             self.config_output_relpath,
             self.enable_scan_optimization)
+        self.enable_bundle_config_check = False
+        if os.path.exists(self.build_config_json_file):
+            _build_config_json = read_json_file(self.build_config_json_file)
+            if isinstance(_build_config_json, dict):
+                self.enable_bundle_config_check = _build_config_json.get(
+                    'enable_bundle_config_check', False)
         overrided_components = self._override_components()
 
         self._platforms_info = platforms_loader.get_platforms_info(
@@ -141,7 +149,8 @@ class OHOSLoader(LoadInterface):
             overrided_components,
             bundle_subsystem_allow_list,
             self.skip_partlist_check,
-            self.build_xts)
+            self.build_xts,
+            self.enable_bundle_config_check)
         self.parts_targets = self.parts_config_info.get('parts_targets')
         self.phony_targets = self.parts_config_info.get('phony_target')
         self.parts_info = self.parts_config_info.get('parts_info')
