@@ -207,6 +207,7 @@ template("build_ext_component") {
                            [
                              "no_default_deps",
                              "deps",
+                             "inputs"
                            ])
     args = []
     if (defined(invoker.exec_path)) {
