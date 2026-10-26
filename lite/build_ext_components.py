@@ -23,6 +23,7 @@ import shlex
 from tempfile import NamedTemporaryFile
 from shutil import copyfile
 from datetime import datetime
+from pathlib import Path
 
 
 def cmd_exec(command: str, temp_file: str, error_log_path: str):
@@ -47,6 +48,15 @@ def cmd_exec(command: str, temp_file: str, error_log_path: str):
     return ret_code
 
 
+def write_out_stamp(out_stamp: str):
+    # Write the stamp file declared in 'outputs' of the build_ext_component
+    # template, so ninja can find the declared output and treat this action
+    # edge as clean during incremental builds.
+    stamp_path = os.path.abspath(out_stamp)
+    Path(stamp_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(stamp_path).touch()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--path', help='Build path.')
@@ -55,10 +65,14 @@ def main():
     parser.add_argument('--enable', help='enable python.', nargs='*')
     parser.add_argument('--target_dir', nargs=1)
     parser.add_argument('--out_dir', nargs=1)
+    parser.add_argument('--out_stamp', help='Stamp file')
     args = parser.parse_args()
 
     if args.enable:
         if args.enable[0] == 'false':
+            if args.out_stamp:
+                # Keep the declared ninja output present even when disabled.
+                write_out_stamp(args.out_stamp)
             return 0
 
     if args.path:
@@ -85,6 +99,8 @@ def main():
         os.remove(temp_file.name)
 
         os.chdir(curr_dir)
+        if args.out_stamp:
+            write_out_stamp(args.out_stamp)
     return 0
 
 
