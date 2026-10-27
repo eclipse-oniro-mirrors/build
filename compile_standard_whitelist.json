@@ -39,8 +39,6 @@
         "//vendor/hihope/ipcamera/bluetooth:libbt_vendor"
     ],
     "deps_added_external_part_module": [
-        "//commonlibrary/ets_utils/js_sys_module/console:console",
-        "//commonlibrary/ets_utils/js_sys_module/timer:timer",
         "//device/qemu/common/virt_full/hardware/display:display_composer_vendor",
         "//device/qemu/common/virt_full/hardware/display:libdisplay_buffer_vdi_impl",
         "//device/qemu/common/virt_full/hardware/display:libdisplay_buffer_vendor",
