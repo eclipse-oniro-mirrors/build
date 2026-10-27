@@ -37,6 +37,15 @@ declare_args() {
   # platforms that enables the always beneficial instructions from the LSE
   # instruction extension.
   armv8_1_lse_tuning_optimization = false
+
+  # Whether to enable affine global variable reordering optimization.
+  build_framework_enable_global_reordering = false
+
+  # Whether to enable affine ThinLTO name collision analysis.
+  build_framework_enable_thinlto_nca = false
+
+  # Whether to enable rcpc feature, introducing ldapr instruction for ARMv8.2+
+  build_framework_enable_rcpc = false
 }
 
 declare_args() {
@@ -289,9 +298,6 @@ declare_args() {
 # enhance some optimizations
 declare_args() {
   enhanced_opt = true
-  build_framework_enable_global_reordering = false
-  build_framework_enable_rcpc = false
-  build_framework_enable_thinlto_nca = false
 }
 
 # build target type
