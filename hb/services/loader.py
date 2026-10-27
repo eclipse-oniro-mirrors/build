@@ -423,7 +423,7 @@ class OHOSLoader(LoadInterface):
         developtools_syscap_path = os.path.join(
             self.source_root_dir, self.gn_root_out_dir, "developtools", "syscap_codec")
         if not os.path.exists(developtools_syscap_path):
-            os.makedirs(developtools_syscap_path, exists_ok=True)
+            os.makedirs(developtools_syscap_path, exist_ok=True)
         full_syscap_for_init_file = os.path.join(
             developtools_syscap_path, "full_syscap.para")
         with open(full_syscap_for_init_file, "w") as file:
