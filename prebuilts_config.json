@@ -1079,6 +1079,27 @@
                 }
             },
             "handle": []
+        },
+        {
+            "name": "jsvm",
+            "tag": "jsvm",
+            "build_type": "src, indep",
+            "unzip_filename": "jsvm",
+            "config": {
+                "linux": {
+                    "x86_64": [
+                        {
+                            "unzip_dir": "${code_dir}/vendor/default/binary/artifacts",
+                            "remote_url": "/openharmony/compiler/jsvm/arkcompiler_jsvm_7.0.0_20261013.tar.gz"
+                        },
+                        {
+                            "unzip_dir": "${code_dir}/vendor/default/binary/artifacts/js_engine_url",
+                            "remote_url": "/openharmony/compiler/jsvm/llvm-linux-19.1.7-x86_64_20260424.tar.gz"
+                        }
+                    ]
+                }
+            },
+            "handle": []
         }
     ]
 }
