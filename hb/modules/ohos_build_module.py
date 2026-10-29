@@ -70,6 +70,7 @@ class OHOSBuildModule(BuildModuleInterface):
             monitor.run()
             raise exception
         else:
+            monitor.run()
             LogUtil.hb_info('{} build success'.format(
                 self.args_dict.get('product_name').arg_value))
 
