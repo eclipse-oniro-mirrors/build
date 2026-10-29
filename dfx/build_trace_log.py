@@ -179,7 +179,7 @@ class BuildTraceLog:
                 if "raw_args" in event and event["raw_args"] and not self.build_command:
                     raw_args = event.get("raw_args", [])
                     if raw_args:
-                        self.build_command = "./build.sh " + " ".join(raw_args)
+                        self.build_command = f"./build.sh {' '.join(raw_args)}"
                     else:
                         self.build_command = "unknown command"
                     self.build_target = self._parse_build_target()
@@ -544,6 +544,7 @@ def process_build_trace_log(log_dir=None, output_format='text', log_file=None):
             from dfx.build_trace_uploader import upload_build_trace_log
             ret = upload_build_trace_log(log_file=latest_log_file)
             dfx_info(f"Upload build trace log: {ret.get('message', 'Success')}")
+            return ret
         elif output_format == 'json':
             trace_log.from_build_traces_log(latest_log_file)
             result_dict = trace_log.to_dict()
@@ -574,7 +575,7 @@ def process_build_trace_log(log_dir=None, output_format='text', log_file=None):
             dfx_info(f"Removing log file: {log_file}")
             try:
                 os.remove(latest_log_file)
-            except:
+            except Exception as e:
                 pass
 
 
