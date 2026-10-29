@@ -16,12 +16,15 @@
 import argparse
 import os
 import sys
+import stat
 
 
 def resource_file_to_bytecode(input_dir, input_file, output_path):
     with open(os.path.join(input_dir, input_file), 'rb')\
             as resource_file_object:
-        with open(output_path, 'a') as cpp_file_object:
+        flags = os.O_WRONLY | os.O_CREAT
+        modes = stat.S_IWUSR | stat.S_IRUSR
+        with os.fdopen(os.open(output_path, flags, modes), 'a') as cpp_file_object:
             length = 0;
             all_the_content = resource_file_object.read();
             template0 = "#include <stdint.h>\n";
