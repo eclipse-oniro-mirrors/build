@@ -773,6 +773,14 @@ template("ohos_ndk_lite_library") {
 
     _ndk_shlib_target = "${target_name}_${_toolchain_name}__ndk_shlib"
 
+    _stack_chk_stub_file = target_gen_dir + "/${target_name}.ndk/stack_chk_fail.c"
+    write_file(_stack_chk_stub_file,
+               "void __stack_chk_fail(void) { } unsigned long __stack_chk_guard = 0;")
+    _stack_protector_config = "${target_name}_${_toolchain_name}__ssp_all"
+    config(_stack_protector_config) {
+      cflags = [ "-fstack-protector-all" ]
+    }
+
     shared_library(_ndk_shlib_target) {
       forward_variables_from(invoker,
                              [
@@ -783,7 +791,11 @@ template("ohos_ndk_lite_library") {
                                "include_dirs",
                              ])
       deps = [ ":$_ndk_stub_target" ]
-      sources = [ _generated_ndk_stub_file ]
+      configs += [ ":$_stack_protector_config" ]
+      sources = [
+        _generated_ndk_stub_file,
+        _stack_chk_stub_file,
+      ]
       output_dir = target_out_dir + "/$_toolchain_name"
       output_name = _output_name
       output_extension = _output_extension
