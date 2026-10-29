@@ -51,7 +51,8 @@ def convert_permission_method(source_root: str, project_path: str, file_name: st
     process = subprocess.Popen([nodejs, tool, config, output_path], shell=False,
                         cwd=os.path.abspath(os.path.join(source_root, permission_convert_dir)),
                         stdout=subprocess.PIPE)
-    process.wait()
+    if process.wait() != 0:
+        raise subprocess.CalledProcessError(process.returncode, process.args)
 
 
 def replace_sdk_api_dir(source_root: str, project_path: str, file_name: str):

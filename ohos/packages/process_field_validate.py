@@ -319,7 +319,7 @@ def iterate_cfg_folder(cfg_dir: str):
 
 def main():
     opts, args = getopt.getopt(sys.argv[1:], '', ['sys-cfg-folder=', 'vendor-cfg-folder=', \
-        'high-privilege-process-list-path=', 'critical-reboot-process-list-path=', 'result-path='])
+        'high-privilege-process-list-path=', 'critical-reboot-process-list-path=', 'result-path=', 'depfile='])
 
     sys_cfg_folder = opts[0][1]
     if not os.path.exists(sys_cfg_folder):
@@ -339,6 +339,26 @@ def main():
 
     validate_cfg_file(privilege_process_path, critical_process_path, None)
 
+    extra = dict(opts)
+    result_path = extra.get('--result-path')
+    depfile = extra.get('--depfile')
+    if depfile and result_path:
+        dependencies = set()
+        for value in (sys_cfg_folder, vendor_cfg_folder, privilege_process_path, critical_process_path):
+            path = os.path.abspath(value)
+            while not os.path.exists(path):
+                path = os.path.dirname(path)
+            dependencies.add(path)
+            if os.path.isdir(value):
+                dependencies.update(os.path.join(value, name) for name in os.listdir(value)
+                                    if name.endswith('.cfg'))
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        from scripts.util.build_utils import write_depfile
+        write_depfile(depfile, result_path, sorted(dependencies), add_pydeps=False)
+    if result_path:
+        os.makedirs(os.path.dirname(os.path.abspath(result_path)), exist_ok=True)
+        with open(result_path, 'w'):
+            pass
     return
 
 if __name__ == "__main__":

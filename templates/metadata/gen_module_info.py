@@ -239,7 +239,7 @@ def main():
     args = create_module_info_parser().parse_args()
 
     # write module info file
-    write_json_file(args.output_file, gen_module_info_data(args))
+    write_json_file(args.output_file, gen_module_info_data(args), check_changes=True)
 
     if args.depfile:
         _dep_files = []

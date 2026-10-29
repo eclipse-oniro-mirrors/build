@@ -25,7 +25,7 @@ def _output_subsystem_configs(output_dir, subsystem_configs):
     build_config_file_name = "subsystem_build_config.json"
     build_config_file = os.path.join(output_dir, 'subsystem_info',
                                      build_config_file_name)
-    write_json_file(build_config_file, subsystem_configs)
+    write_json_file(build_config_file, subsystem_configs, check_changes=True)
 
     src_output_file_name = "src_subsystem_info.json"
     no_src_output_file_name = "no_src_subsystem_info.json"
@@ -35,12 +35,12 @@ def _output_subsystem_configs(output_dir, subsystem_configs):
         src_subsystem[key] = val.get('path')
     src_output_file = os.path.join(output_dir, 'subsystem_info',
                                    src_output_file_name)
-    write_json_file(src_output_file, src_subsystem)
+    write_json_file(src_output_file, src_subsystem, check_changes=True)
 
     no_src_output_file = os.path.join(output_dir, 'subsystem_info',
                                       no_src_output_file_name)
     write_json_file(no_src_output_file,
-                    subsystem_configs.get('no_src_subsystem'))
+                    subsystem_configs.get('no_src_subsystem'), check_changes=True)
 
 
 def merge_subsystem_overlay(subsystem_configs, subsystem_config_overlay, key):

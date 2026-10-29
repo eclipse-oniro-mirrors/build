@@ -79,7 +79,8 @@ def copy_arkts_api_method(source_root: str, out_path: str, nodejs: str, sdk_type
     p = subprocess.Popen([nodejs, tool, "--path", input_path, "--output", output_path, "--type",
                           sdk_type, "--isPublic", is_public, "--create-keep-file", "true",
                           "--sdk-build-arkts", sdk_build_arkts], stdout=subprocess.PIPE)
-    p.wait()
+    if p.wait() != 0:
+        raise subprocess.CalledProcessError(p.returncode, p.args)
 
 
 # API_LEVEL校验
@@ -96,7 +97,8 @@ def check_api_version_method(source_root: str, api_root: str, sdk_version: str, 
     stdout, stderr = p.communicate()
     check_result = stdout.decode()
 
-    p.wait()
+    if p.wait() != 0:
+        raise subprocess.CalledProcessError(p.returncode, p.args)
 
     # 创建转换表，过滤文本中的换行、空格等字符
     custom_rules = str.maketrans("", "", " \n\t\r")
@@ -118,7 +120,8 @@ def remove_system_api_method(source_root: str, out_path: str, nodejs: str, sdk_t
     nodejs = os.path.abspath(nodejs)
     p = subprocess.Popen([nodejs, tool, "--input", api_dir, "--output",
                           api_out_dir, "--type", sdk_type, "--build-sdk-path", build_sdk_path], stdout=subprocess.PIPE)
-    p.wait()
+    if p.wait() != 0:
+        raise subprocess.CalledProcessError(p.returncode, p.args)
 
 
 def adjust_annotation_method(source_root: str, out_path: str, nodejs: str):
@@ -132,7 +135,8 @@ def adjust_annotation_method(source_root: str, out_path: str, nodejs: str):
     nodejs = os.path.abspath(nodejs)
     p = subprocess.Popen([nodejs, tool, "--input", api_dir, "--output",
                           api_out_dir], stdout=subprocess.PIPE)
-    p.wait()
+    if p.wait() != 0:
+        raise subprocess.CalledProcessError(p.returncode, p.args)
 
 
 def change_int_to_number(source_root: str, out_path: str, nodejs: str, sdk_type: str):
@@ -152,7 +156,8 @@ def change_int_to_number(source_root: str, out_path: str, nodejs: str, sdk_type:
                           str(index)], stdout=subprocess.PIPE))
 
     for process_obj in process_list:
-        process_obj.wait()
+        if process_obj.wait() != 0:
+            raise subprocess.CalledProcessError(process_obj.returncode, process_obj.args)
 
 
 def parse_single_step(options, i):
@@ -203,6 +208,34 @@ def parse_step(options):
             f.result()  # 等待任务完成并获取结果
 
 
+
+def record_dependencies(options):
+    # Include sources and directory membership so new/removed API files and
+    # transformations invalidate the cached split. Output FILES detect loss
+    # without depending on output directory mtimes modified by consumers.
+    dependencies = {__file__, os.path.join(os.path.dirname(__file__), "convert_permissions.py"),
+                    options.node_js, os.path.join(options.root_build_dir,
+                    "base/security/access_token/services/accesstokenmanager/permission_definitions.json")}
+    source = os.path.join(options.root_build_dir, INTERFACE_PATH)
+    roots = [(source, True), (options.output_interface_sdk, False)]
+    if options.sdk_build_public == "true":
+        roots.append((os.path.join(options.build_sdk_path, "build-tools/ets2panda"), True))
+    for root, source_tree in roots:
+        for directory, directories, files in os.walk(root):
+            directories[:] = [name for name in directories if name not in (".git", ".repo", "__pycache__")]
+            if source_tree:
+                dependencies.add(directory)
+            dependencies.update(os.path.join(directory, name) for name in files)
+    sys.path.insert(0, os.path.join(options.root_build_dir, "build"))
+    from scripts.util.build_utils import write_depfile
+    # The first GN output is the representative API header, not the marker.
+    # An explicit output cannot also be its own implicit input.
+    primary_output = os.path.join(options.output_interface_sdk, OUT_ROOT_LIST[0],
+                                  API_PATH, "bundle/bundleStatusCallback.d.ts")
+    dependencies.discard(primary_output)
+    write_depfile(options.depfile, primary_output, sorted(dependencies), add_pydeps=False)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root-build-dir', required=True)
@@ -214,10 +247,18 @@ def main():
     parser.add_argument('--build-sdk-path', required=True)
     parser.add_argument('--sdk-build-check-level', required=True)
     parser.add_argument('--sdk-api-version', required=True)
+    parser.add_argument('--stamp')
+    parser.add_argument('--depfile')
 
     options = parser.parse_args()
 
     parse_step(options)
+    if options.depfile:
+        record_dependencies(options)
+    if options.stamp:
+        os.makedirs(os.path.dirname(os.path.abspath(options.stamp)), exist_ok=True)
+        with open(options.stamp, 'w', encoding='utf-8'):
+            pass
 
 
 if __name__ == '__main__':

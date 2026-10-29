@@ -587,6 +587,15 @@ template("app_sign") {
       "--hap-name",
       hap_name,
     ]
+    if (_sign_hap_py_path == "//build/scripts/app_sign.py") {
+      depfile = "${target_gen_dir}/${target_name}.d"
+      args += [
+        "--stamp",
+        rebase_path(outputs[0], root_build_dir),
+        "--depfile",
+        rebase_path(depfile, root_build_dir),
+      ]
+    }
     if (defined(invoker.hap_list)) {
       args += [
         "--hap-list",

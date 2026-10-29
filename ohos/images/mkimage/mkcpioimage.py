@@ -134,6 +134,15 @@ def main(args):
     print("Make cpio image!")
     build_run_cpio(args)
     build_run_chmod(args)
+    # Keep the established images/ payloads and also honor the output declared
+    # by the caller. GN passes these bare names, while the legacy cpio path
+    # writes images/ramdisk.img or images/updater.img instead.
+    image_names = {"ramdisk.img": "ramdisk.img", "updater_ramdisk.img": "updater.img"}
+    if args.device in image_names:
+        actual = os.path.join(os.path.dirname(os.path.abspath(args.src_dir)),
+                              "images", image_names[args.device])
+        if os.path.realpath(args.device) != os.path.realpath(actual):
+            shutil.copy2(actual, args.device)
 
 
 if __name__ == '__main__':

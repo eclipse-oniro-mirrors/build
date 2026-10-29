@@ -408,8 +408,9 @@ foreach(_platform, target_platform_list) {
 
     deps = [ ":${_platform}_install_modules" ]
 
-    # result is not used in script
+    # Written only after the existing process-field validation succeeds.
     process_validate_result = "${current_platform_dir}/cfg_validate_result.txt"
+    depfile = "$target_gen_dir/$target_name.d"
 
     # ext_root_proc_conf_path defined in config.json in vendor warehouse
     if (ext_root_proc_conf_path != "") {
@@ -439,6 +440,10 @@ foreach(_platform, target_platform_list) {
       rebase_path(_privilege_whitelist, root_build_dir),
       "--critical-reboot-process-list-path",
       rebase_path(_critical_whitelist, root_build_dir),
+      "--result-path",
+      rebase_path(process_validate_result, root_build_dir),
+      "--depfile",
+      rebase_path(depfile, root_build_dir),
     ]
   }
 }

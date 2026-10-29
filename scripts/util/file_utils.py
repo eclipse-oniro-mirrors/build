@@ -84,7 +84,9 @@ def __check_changes(output_file, content):
     if not os.path.isfile(output_file):
         return True
     try:
-        return read_json_file(output_file) != content
+        # Python equality conflates True/1 and 1/1.0. JSON configuration types
+        # are significant, so compare canonical serialized representations.
+        return json.dumps(read_json_file(output_file), sort_keys=True) != json.dumps(content, sort_keys=True)
     except json.decoder.JSONDecodeError:
         # Rewrite malformed generated output left by an interrupted build.
         return True
@@ -102,10 +104,13 @@ def write_file(output_file, content):
     if not os.path.exists(file_dir):
         os.makedirs(file_dir, exist_ok=True)
 
+    if output_file.endswith('.gni') or output_file.endswith('.gn'):
+        # Compare the final formatted representation, not the raw template.
+        content = subprocess.check_output(
+            [gn_exe, 'format', '--stdin'], input=content, text=True)
+    if os.path.isfile(output_file):
+        with open(output_file, 'r') as output_f:
+            if output_f.read() == content:
+                return
     with open(output_file, 'w') as output_f:
         output_f.write(content)
-    if output_file.endswith('.gni') or output_file.endswith('.gn'):
-        # Call gn format to make the output gn file prettier.
-        cmd = [gn_exe, 'format']
-        cmd.append(output_file)
-        subprocess.check_output(cmd)

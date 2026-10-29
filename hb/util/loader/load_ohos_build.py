@@ -793,7 +793,7 @@ def _output_all_components_info(parts_config_dict, parts_info_output_path):
 
     _component_file = os.path.join(parts_info_output_path,
                                    "components.json")
-    write_json_file(_component_file, components)
+    write_json_file(_component_file, components, check_changes=True)
 
 
 def _output_parts_info(parts_config_dict,
@@ -856,7 +856,7 @@ def process_parts_modules_info(parts_config_dict, parts_info_output_path):
         _output_info['parts'] = _all_p_info
         parts_modules_info_file = os.path.join(parts_info_output_path,
                                                'parts_modules_info.json')
-        write_json_file(parts_modules_info_file, _output_info)
+        write_json_file(parts_modules_info_file, _output_info, check_changes=True)
         LogUtil.hb_info("generate parts modules info to '{}'".format(
             parts_modules_info_file), mode=Config.log_mode)
 
@@ -866,7 +866,7 @@ def process_parts_path_info(parts_config_dict, parts_info_output_path):
         parts_path_info = parts_config_dict.get('parts_path_info')
         parts_path_info_file = os.path.join(parts_info_output_path,
                                             'parts_path_info.json')
-        write_json_file(parts_path_info_file, parts_path_info)
+        write_json_file(parts_path_info_file, parts_path_info, check_changes=True)
         LogUtil.hb_info(
             "generate parts path info to '{}'".format(parts_path_info_file), mode=Config.log_mode)
         path_to_parts = {}
@@ -876,7 +876,7 @@ def process_parts_path_info(parts_config_dict, parts_info_output_path):
             path_to_parts[_val] = _p_list
         path_to_parts_file = os.path.join(parts_info_output_path,
                                           'path_to_parts.json')
-        write_json_file(path_to_parts_file, path_to_parts)
+        write_json_file(path_to_parts_file, path_to_parts, check_changes=True)
         LogUtil.hb_info(
             "generate path to parts to '{}'".format(path_to_parts_file), mode=Config.log_mode)
 
@@ -886,7 +886,7 @@ def process_subsystem_parts(config_output_path, parts_config_dict, parts_info_ou
         subsystem_parts = parts_config_dict.get('subsystem_parts')
         subsystem_parts_file = os.path.join(parts_info_output_path,
                                             "subsystem_parts.json")
-        write_json_file(subsystem_parts_file, subsystem_parts)
+        write_json_file(subsystem_parts_file, subsystem_parts, check_changes=True)
         LogUtil.hb_info(
             "generate ubsystem-parts of parts-info to '{}'".format(
                 subsystem_parts_file), mode=Config.log_mode)
@@ -898,7 +898,7 @@ def process_subsystem_parts(config_output_path, parts_config_dict, parts_info_ou
             _sub_info_output_file = os.path.join(config_output_path,
                                                  'mini_adapter',
                                                  '{}.json'.format(_sub_name))
-            write_json_file(_sub_info_output_file, _output_info)
+            write_json_file(_sub_info_output_file, _output_info, check_changes=True)
         LogUtil.hb_info(
             "generate mini adapter info to '{}/mini_adapter/'".format(
                 config_output_path), mode=Config.log_mode)
@@ -909,7 +909,7 @@ def process_parts_info(parts_config_dict, parts_info_output_path, skip_partlist_
         parts_info = parts_config_dict.get('parts_info')
         parts_info_file = os.path.join(parts_info_output_path,
                                        "parts_info.json")
-        write_json_file(parts_info_file, parts_info)
+        write_json_file(parts_info_file, parts_info, check_changes=True)
         LogUtil.hb_info("generate parts info to '{}'".format(parts_info_file), mode=Config.log_mode)
         _part_subsystem_dict = {}
         for key, value in parts_info.items():
@@ -919,7 +919,7 @@ def process_parts_info(parts_config_dict, parts_info_output_path, skip_partlist_
                 break
         _part_subsystem_file = os.path.join(parts_info_output_path,
                                             "part_subsystem.json")
-        write_json_file(_part_subsystem_file, _part_subsystem_dict)
+        write_json_file(_part_subsystem_file, _part_subsystem_dict, check_changes=True)
         LogUtil.hb_info(
             "generate part-subsystem of parts-info to '{}'".format(
                 _part_subsystem_file), mode=Config.log_mode)

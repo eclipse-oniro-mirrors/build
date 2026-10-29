@@ -15,6 +15,7 @@
 
 
 import os
+import re
 import sys
 import shutil
 
@@ -69,6 +70,22 @@ gn_file_template = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 'build_gn.template')
 
 
+def preserve_target_order(targets, output_file):
+    """Keep a valid installed baseline's order when target membership is equal.
+
+    Parts can install overlapping destinations. Stabilizing an existing graph
+    must not pick a different winner merely because scanners finished in a
+    different order. Changed membership follows the existing producer logic.
+    """
+    if not os.path.isfile(output_file):
+        return targets
+    with open(output_file) as source:
+        previous = re.findall(r'^\s*"([^"\n]+)"\s*,?\s*$', source.read(), re.MULTILINE)
+    if len(previous) == len(targets) and len(set(previous)) == len(previous) and set(previous) == set(targets):
+        return previous
+    return targets
+
+
 def gen_targets_gn(parts_targets, config_output_dir):
     parts_list = []
     inner_kits_list = []
@@ -86,6 +103,7 @@ def gen_targets_gn(parts_targets, config_output_dir):
         if 'test' in part_labels:
             parts_test_list.append(part_labels.get('test'))
     parts_list_gni_file = os.path.join(config_output_dir, 'parts_list.gni')
+    parts_list = preserve_target_order(parts_list, parts_list_gni_file)
     parts_list_content = '"{}",'.format('",\n  "'.join(parts_list))
     write_file(parts_list_gni_file,
                PARTS_LIST_GNI_TEMPLATE.format(parts_list_content))

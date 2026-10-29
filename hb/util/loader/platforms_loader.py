@@ -191,7 +191,7 @@ def get_platforms_info(platforms_config_file, source_root_dir, root_build_dir,
     all_parts = platform_loader.get_all_parts()
     all_parts_file = os.path.join(source_root_dir, config_output_relpath,
                                   platforms_info_output_dir, "all_parts.json")
-    write_json_file(all_parts_file, all_parts)
+    write_json_file(all_parts_file, all_parts, check_changes=True)
     LogUtil.hb_info(
         "generate all parts of platforms info to '{}'".format(all_parts_file), mode=Config.log_mode)
 

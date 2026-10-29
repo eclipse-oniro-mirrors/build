@@ -197,6 +197,16 @@ def get_all_js_sources(base) -> list:
     return sources
 
 
+
+def loader_dependencies(loader_home):
+    # Webpack's shared .cache holds outputs of other HAP compilations, not
+    # compiler inputs. Track installed tool sources, not those mutable maps.
+    cache = os.path.normpath(os.path.join(loader_home, "node_modules", ".cache"))
+    return [path for path in build_utils.get_all_files(loader_home)
+            if not os.path.normpath(path).startswith(cache + os.sep)
+            and not os.path.basename(path).endswith(('.tsbuildinfo', '.tsbuildinfo.linter'))]
+
+
 def main(args):
     options = parse_args(args)
 
@@ -206,8 +216,10 @@ def main(args):
     ]
     depfiles = []
     if not options.js_assets_dir and not options.ets_assets_dir:
-        with ZipFile(options.output, 'w') as file:
-            return
+        with ZipFile(options.output, 'w'):
+            pass
+        build_utils.write_depfile(options.depfile, options.output, [])
+        return
 
     if options.ark_es2abc_dir:
         depfiles.extend(build_utils.get_all_files(options.ark_es2abc_dir))
@@ -216,8 +228,8 @@ def main(args):
     depfiles.append(options.webpack_ets)
     depfiles.append(options.webpack_config_js)
     depfiles.append(options.webpack_config_ets)
-    depfiles.extend(build_utils.get_all_files(options.ace_loader_home))
-    depfiles.extend(build_utils.get_all_files(options.ets_loader_home))
+    depfiles.extend(loader_dependencies(options.ace_loader_home))
+    depfiles.extend(loader_dependencies(options.ets_loader_home))
 
     node_js = os.path.relpath(options.nodejs_path, options.ace_loader_home)
     assets_dict = dict()

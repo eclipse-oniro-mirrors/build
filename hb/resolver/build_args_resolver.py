@@ -95,9 +95,13 @@ class BuildArgsResolver(ArgsResolverInterface):
             target_generator.regist_arg('ohos_build_compiler_specified',
                                         ProductUtil.get_compiler(config.device_path))
 
+        snapshot_time = os.environ.get('OHOS_INCREMENTAL_BUILD_TIME')
+        snapshot_datetime = os.environ.get('OHOS_INCREMENTAL_BUILD_DATETIME')
         target_generator.regist_arg('ohos_build_time',
+                                    int(snapshot_time) if snapshot_time else
                                     SystemUtil.get_current_time(time_type='timestamp'))
         target_generator.regist_arg('ohos_build_datetime',
+                                    snapshot_datetime or
                                     SystemUtil.get_current_time(time_type='datetime'))
 
         features_dict = ProductUtil.get_features_dict(config.product_json)

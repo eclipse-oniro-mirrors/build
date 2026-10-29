@@ -42,8 +42,13 @@ class IoUtil(metaclass=NoInstance):
 
     @staticmethod
     def dump_json_file(dump_file: str, json_data: dict or list):
+        content = json.dumps(json_data, ensure_ascii=False, indent=2)
+        if os.path.isfile(dump_file):
+            with open(dump_file, encoding='utf-8') as json_file:
+                if json_file.read() == content:
+                    return
         with open(dump_file, 'wt', encoding='utf-8') as json_file:
-            json.dump(json_data, json_file, ensure_ascii=False, indent=2)
+            json_file.write(content)
 
     @staticmethod
     def read_file(file_path: str):

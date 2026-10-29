@@ -54,6 +54,14 @@ while [[ ! -f "${SOURCE_ROOT_DIR}/.gn" ]]; do
     fi
 done
 
+# Detect relocation before preloader/loader/GN can rewrite the imported graph.
+if [[ "${OHOS_INCREMENTAL_ENTERED:-}" != "${SOURCE_ROOT_DIR}" ]]; then
+  exec python3 "${SOURCE_ROOT_DIR}/build/scripts/incremental_workspace.py" \
+    --root "${SOURCE_ROOT_DIR}" prepare -- "$@"
+fi
+
+incremental_original_args=("$@")
+
 if [[ "${SOURCE_ROOT_DIR}x" == "x" ]]; then
   echo -e "\033[31m[OHOS ERROR] SOURCE_ROOT_DIR cannot be empty.\033[0m"
   exit 1
@@ -224,6 +232,12 @@ fi
 if [[ "$?" -ne 0 ]]; then
     echo -e "\033[31m=====build ${product_name} error=====\033[0m"
     exit 1
+fi
+python3 "${SOURCE_ROOT_DIR}/build/scripts/incremental_workspace.py" \
+  --root "${SOURCE_ROOT_DIR}" finish -- "${incremental_original_args[@]}"
+if [[ "$?" -ne 0 ]]; then
+  echo "[OHOS ERROR] Build completed but recording the relocatable baseline failed."
+  exit 1
 fi
 echo -e "\033[32m=====build ${product_name} successful=====\033[0m"
 
