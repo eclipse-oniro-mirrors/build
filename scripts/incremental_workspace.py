@@ -68,27 +68,55 @@ def build_request(arguments):
     return request
 
 
+def legacy_source_root(root, build):
+    """Recover a legacy root even if HB has already refreshed ohos_config.json.
+
+    Require the source and binary CMake roots to agree with this imported
+    flatbuffers cache. Do not infer a workspace from an arbitrary CMake path.
+    """
+    candidates = {}
+    suffix = '/third_party/flatbuffers'
+    for cache in build.glob('clang_*/third_party/flatbuffers/CMakeCache.txt'):
+        fields = dict(re.findall(
+            r'^(CMAKE_HOME_DIRECTORY|CMAKE_CACHEFILE_DIR):INTERNAL=(.*)$',
+            cache.read_text(errors='replace'), re.M))
+        source = fields.get('CMAKE_HOME_DIRECTORY', '').rstrip('/')
+        binary = fields.get('CMAKE_CACHEFILE_DIR', '').rstrip('/')
+        if not source.endswith(suffix):
+            continue
+        canonical = Path(source[:-len(suffix)])
+        expected = canonical / cache.parent.relative_to(root)
+        if canonical.is_absolute() and canonical != Path('/') and binary == str(expected):
+            candidates[canonical] = str(cache.relative_to(root))
+    if len(candidates) == 1:
+        canonical = next(iter(candidates))
+        return canonical, candidates[canonical]
+    config = root / 'out/ohos_config.json'
+    if config.is_file():
+        stored = json.loads(config.read_text()).get('root_path')
+        if isinstance(stored, str) and Path(stored).is_absolute():
+            return Path(stored), 'out/ohos_config.json'
+    return None, None
+
+
 def prepare_build(root, arguments):
     destination = root / MANIFEST
     if destination.exists():
         data = json.loads(destination.read_text())
     else:
-        # Legacy output can still preserve paths on a rename. Source timestamp
-        # fingerprints require the automatic seal from a successful build.
+        # Old CI snapshots have no content fingerprints. Preserve their path
+        # semantics, but do not claim that transferred input times can be reused.
         request = build_request(arguments)
-        config_file = root / 'out/ohos_config.json'
-        if not request.product_name or not config_file.is_file():
-            return
-        config = json.loads(config_file.read_text())
-        stored_root = config.get('root_path')
-        if not isinstance(stored_root, str) or not Path(stored_root).is_absolute():
-            return
-        canonical = Path(stored_root)
-        if canonical == root:
+        if not request.product_name:
             return
         build = root / 'out' / request.product_name.split('@', 1)[0]
         if not (build / 'build.ninja').is_file():
             return
+        canonical, evidence = legacy_source_root(root, build)
+        if canonical is None or canonical == root:
+            return
+        print(f'incremental workspace: legacy root {canonical} from {evidence}; '
+              'source timestamp fingerprints are unavailable', flush=True)
         data = {'version': 1, 'canonical_root': str(canonical),
                 'build_dir': str(build.relative_to(root)), 'target': 'make_all',
                 'files': {}, 'tools': {}, 'automatic': True, 'unsealed': True}
@@ -102,6 +130,7 @@ def prepare_build(root, arguments):
         raise ValueError('Unsupported manifest version')
     if (data.get('automatic') and Path(data['canonical_root']) == root
             and data.get('origin_instance') == instance_identity(root)):
+        print(f'incremental workspace: in-place build at {root}', flush=True)
         return  # Ordinary in-place build keeps its existing build-time behavior.
     enter(root, data, ['bash', './build.sh', *arguments])
 
@@ -399,6 +428,7 @@ def enter(root, data, command):
         os.execvpe(command[0], command, env)
     if not shutil.which('bwrap'):
         raise RuntimeError('Cross-path reuse requires bubblewrap or an equivalent CI container mount')
+    print(f'incremental workspace: mapping {root} to {canonical}', flush=True)
     mountpoint_args = private_mountpoint(canonical)
     # Validate tools inside the mapped root: absolute CI symlinks can be
     # intentionally unresolved in the physical checkout before this bind.

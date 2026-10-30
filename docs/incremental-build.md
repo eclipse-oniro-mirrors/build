@@ -28,8 +28,14 @@ Install bubblewrap on Linux before relocating a workspace. Ordinary in-place
 builds do not require a namespace and retain their build-time behavior. Keep
 symlinks, nanosecond mtimes, .ninja_log and .ninja_deps when archiving the complete
 workspace; the CI build must include this entry-script change. Legacy output
-without a baseline can recover its original root from out/ohos_config.json,
-but cannot restore source timestamps until a successful build records them.
+without a baseline first checks flatbuffers CMakeCache.txt source and binary
+roots for agreement, then falls back to out/ohos_config.json. This recovers old
+CI roots even when HB has already rewritten or removed ohos_config.json. It
+cannot restore source timestamps until a successful build records them. An
+old snapshot first patched after export may therefore do substantial real work.
+Deleting out keeps the ordinary clean-build path and creates no namespace.
+Prebuilt inputs outside out must still be prepared with the project downloader;
+for example JSVM requires its pinned V8 library and headers under vendor/.
 Toolchain changes are rejected instead of silently reusing incompatible output.
 Only the explicitly requested make_all captures a complete successful baseline.
 
@@ -74,7 +80,11 @@ are specific to the tested workspace and host.
 python3 -m unittest discover -s build/test/incremental -p 'test_*.py' -v
 ```
 
-All 23 focused regressions passed. The tests perform real Ninja/Clang builds
+All 26 focused regressions passed, including three legacy/cold-entry cases.
+A real CMake/Ninja fixture is built before installing the new entry, moved,
+and rebuilt through the production dispatch hook with missing or rewritten
+ohos_config.json. Both variants compile
+and execute successfully without host placeholder directories. The tests perform real Ninja/Clang builds
 and execute changed consumers, check missing outputs and failing permission
 validation, compare actual ramdisk bytes and exercise concurrent copies. The
 original and isolated-config standard-library ABC files were byte-identical.
