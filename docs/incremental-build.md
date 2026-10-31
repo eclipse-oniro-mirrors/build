@@ -94,6 +94,27 @@ so device behavior and broader XTS/libc stability suites were not verified.
 The build/test/script/start_ex.sh suites remove out/ before running and were
 not executed against this retained workspace.
 
+## Missing bubblewrap at the build entry
+
+The build entry reads the existing workspace manifest before preloader, GN or
+Ninja runs. When the physical workspace differs from the recorded logical root,
+the helper checks for `bwrap` before constructing the private mount namespace.
+An available binary is used directly, without checking privileges or invoking
+the package manager. Ordinary same-path builds do not perform this check.
+
+If `bwrap` is missing, root runs `apt update` followed by
+`apt install -y bubblewrap`; the install is not attempted if the update fails.
+The helper checks that the binary is available afterwards. A non-root user
+gets a failure before build preparation, with this recovery command:
+
+```bash
+sudo apt update && sudo apt install -y bubblewrap
+```
+
+After installation, rerun the original build command. Package-manager failures
+or a still-missing binary terminate the build with the recovery instructions.
+The package bootstrap does not fall back to compiling against unmapped paths.
+
 ## Existing independent proposals
 
 This series does not include the existing proposals ICU !481, graphic_3d !686,

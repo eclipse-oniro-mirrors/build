@@ -406,6 +406,29 @@ def private_mountpoint(canonical):
     return [*args, '--dir', str(canonical)]
 
 
+def ensure_bwrap():
+    if shutil.which('bwrap'):
+        return
+    root_command = 'apt update && apt install -y bubblewrap'
+    manual_command = 'sudo apt update && sudo apt install -y bubblewrap'
+    retry_message = 'After installation, rerun the original build command.'
+    if os.geteuid() != 0:
+        raise RuntimeError('Cross-path reuse requires bubblewrap (bwrap), which is not installed. '
+                           'The current user is not root, so automatic installation is unavailable.\n'
+                           f'Run: {manual_command}\n{retry_message}')
+    print('incremental workspace: bwrap is missing; installing bubblewrap as root: '
+          'apt update && apt install -y bubblewrap', flush=True)
+    try:
+        subprocess.run(['apt', 'update'], check=True)
+        subprocess.run(['apt', 'install', '-y', 'bubblewrap'], check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(f'Automatic bubblewrap installation failed: {error}.\n'
+                           f'Run as root: {root_command}\n{retry_message}') from error
+    if not shutil.which('bwrap'):
+        raise RuntimeError('The installation command completed, but bwrap is still unavailable. '
+                           f'Check PATH or run as root: {root_command}\n{retry_message}')
+
+
 def enter(root, data, command):
     canonical = Path(data['canonical_root'])
     if not canonical.is_absolute() or canonical == Path('/'):
@@ -426,8 +449,7 @@ def enter(root, data, command):
         restore_transferred_snapshot(root, data)
         os.chdir(root)
         os.execvpe(command[0], command, env)
-    if not shutil.which('bwrap'):
-        raise RuntimeError('Cross-path reuse requires bubblewrap or an equivalent CI container mount')
+    ensure_bwrap()
     print(f'incremental workspace: mapping {root} to {canonical}', flush=True)
     mountpoint_args = private_mountpoint(canonical)
     # Validate tools inside the mapped root: absolute CI symlinks can be
