@@ -40,7 +40,7 @@ class UpdateArgsResolver(ArgsResolverInterface):
             part_name = sys.argv[2]
         if part_name:
             update_module.hpm.regist_flag('part_name', part_name)
-    
+
     @staticmethod
     def resolve_global(target_arg: Arg, update_module: UpdateModuleInterface):
         if target_arg.arg_value == True or target_arg.arg_value == '':

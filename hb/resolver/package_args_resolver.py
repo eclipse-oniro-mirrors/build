@@ -36,12 +36,11 @@ class PackageArgsResolver(ArgsResolverInterface):
     @staticmethod
     def resolve_part(target_arg: Arg, package_module: PackageModuleInterface):
         part_name = target_arg.arg_value
-        if len(sys.argv) > 2 and not sys.argv[2].startswith("-"): # 第一个部件名参数
+        if len(sys.argv) > 2 and not sys.argv[2].startswith("-"):  # 第一个部件名参数
             part_name = sys.argv[2]
         if part_name:
             package_module.hpm.regist_flag('part_name', part_name)
 
-    
     @staticmethod
     def resolve_output(target_arg: Arg, package_module: PackageModuleInterface):
         if target_arg.arg_value:
