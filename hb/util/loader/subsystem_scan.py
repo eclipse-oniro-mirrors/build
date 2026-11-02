@@ -141,11 +141,11 @@ def scan(subsystem_config_file, example_subsystem_file, source_root_dir, enable_
     for key, build_files in merged.items():
         if build_files:
             _build_configs[key] = {
-                "path": list(subsystem_infos[key] if isinstance(subsystem_infos[key], list) else [subsystem_infos[key]]),
+                "path": list(subsystem_infos.get(key) if isinstance(subsystem_infos.get(key), list) else [subsystem_infos.get(key)]),
                 "build_files": build_files
             }
         else:
-            no_src_subsystem[key] = list(subsystem_infos[key] if isinstance(subsystem_infos[key], list) else [subsystem_infos[key]])
+            no_src_subsystem[key] = list(subsystem_infos.get(key) if isinstance(subsystem_infos.get(key), list) else [subsystem_infos.get(key)])
 
     scan_result = {
         'source_path': source_root_dir,

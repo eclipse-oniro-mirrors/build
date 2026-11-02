@@ -37,7 +37,7 @@ class IndepBuild(BuildFileGeneratorInterface):
         cmd = ["/bin/bash", "build/indep_configs/build_indep.sh"]
         cmd.extend(flags_list)
         product_name = self._get_product_name()
-        if product_name != None:
+        if product_name is not None:
             cmd.append("--product-name")
             cmd.append(product_name)
         try:
@@ -144,8 +144,8 @@ class IndepBuild(BuildFileGeneratorInterface):
 
     def _get_product_name(self):
         argv = sys.argv
-        for i in range(len(argv)):
-            if argv[i] == '--product-name':
+        for i, x in enumerate(argv):
+            if x == '--product-name':
                 if i + 1 < len(argv):
                     return argv[i + 1]
                 return None
