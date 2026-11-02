@@ -25,23 +25,30 @@ import zipfile
 def unpack(src, dst):
     os.makedirs(dst, exist_ok=True)
     
-    if src.endswith(('.tar.gz', '.tgz')):
-        with tarfile.open(src, 'r:gz') as tf:
-            tf.extractall(dst)
-    elif src.endswith('.tar.bz2'):
-        with tarfile.open(src, 'r:bz2') as tf:
-            tf.extractall(dst)
-    elif src.endswith('.tar.xz'):
-        with tarfile.open(src, 'r:xz') as tf:
-            tf.extractall(dst)
-    elif src.endswith('.tar'):
-        with tarfile.open(src, 'r') as tf:
-            tf.extractall(dst)
-    elif src.endswith('.zip'):
-        with zipfile.ZipFile(src, 'r') as zf:
-            zf.extractall(dst)
-    else:
-        subprocess.run(['tar', '-xf', src, '-C', dst], check=True)
+    if not os.path.isfile(src):
+        raise ValueError(f"Source file {src} does not exist or is not a file")
+    
+    try:
+        if src.endswith(('.tar.gz', '.tgz')):
+            with tarfile.open(src, 'r:gz') as tf:
+                tf.extractall(dst)
+        elif src.endswith('.tar.bz2'):
+            with tarfile.open(src, 'r:bz2') as tf:
+                tf.extractall(dst)
+        elif src.endswith('.tar.xz'):
+            with tarfile.open(src, 'r:xz') as tf:
+                tf.extractall(dst)
+        elif src.endswith('.tar'):
+            with tarfile.open(src, 'r') as tf:
+                tf.extractall(dst)
+        elif src.endswith('.zip'):
+            with zipfile.ZipFile(src, 'r') as zf:
+                zf.extractall(dst)
+        else:
+            subprocess.run(['tar', '-xf', src, '-C', dst], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f'解压失败: {e}')
+        raise
 
 
 def gen_stamp(src, stamp_file):
