@@ -224,12 +224,22 @@ def _get_subsystem_path(part_name: str) -> str:
     if subsystem_name is None:
         return None
     project_root = find_project_root(__file__)
-    subsystem_build_config_file = os.path.join(project_root, 'build', 'subsystem_config.json')
-    config_info = read_json_file(subsystem_build_config_file)
-    if config_info is None:
-        raise Exception(
-            "read file '{}' failed.".format(subsystem_build_config_file))
-    info = config_info.get(subsystem_name)
+    # 尝试读取 subsystem_build_config.json
+    subsystem_build_config_file = os.path.join('build_configs/subsystem_info',
+                                               'subsystem_build_config.json', )
+    if os.path.exists(subsystem_build_config_file):
+        config_info = read_json_file(subsystem_build_config_file)
+        if config_info is None:
+            raise Exception("read file '{}' failed.".format(subsystem_build_config_file))
+        subsystem_infos = config_info.get('subsystem')
+        info = subsystem_infos.get(subsystem_name) if subsystem_infos else None
+    else:
+        # 如果 subsystem_build_config.json 不存在，尝试读取 subsystem_config.json
+        subsystem_build_config_file = os.path.join(project_root, 'build', 'subsystem_config.json')
+        config_info = read_json_file(subsystem_build_config_file)
+        if config_info is None:
+            raise Exception("read file '{}' failed.".format(subsystem_build_config_file))
+        info = config_info.get(subsystem_name)
     if info is None:
         raise Exception(
             "subsystem '{}' info doesn't exist.".format(subsystem_name))

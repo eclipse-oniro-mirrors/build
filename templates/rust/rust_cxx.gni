@@ -21,15 +21,16 @@ template("rust_cxx") {
     output_h = "{{source_gen_dir}}/{{source_file_part}}.h"
     output_cc = "{{source_gen_dir}}/{{source_file_part}}.cc"
     if (ohos_indep_compiler_enable) {
-      cxxbridge_out_dir = get_label_info("rust_cxx:cxxbridge($host_toolchain)",
-                                         "target_out_dir")
+      cxxbridge_target_out_dir =
+          get_label_info("rust_cxx:cxxbridge($host_toolchain)",
+                         "target_out_dir")
       cxxbridge_executable =
-          rebase_path("${cxxbridge_out_dir}/clang_x64/libs/cxxbridge")
+          rebase_path("${cxxbridge_target_out_dir}/clang_x64/libs/cxxbridge")
     } else {
-      cxxbridge_out_dir =
+      cxxbridge_root_out_dir =
           get_label_info("rust_cxx:cxxbridge($host_toolchain)", "root_out_dir")
-      cxxbridge_executable =
-          rebase_path("${cxxbridge_out_dir}/thirdparty/rust_cxx/cxxbridge")
+      cxxbridge_executable = rebase_path(
+              "${cxxbridge_root_out_dir}/thirdparty/rust_cxx/cxxbridge")
     }
 
     script = "//build/templates/rust/rust_cxxbridge.py"
