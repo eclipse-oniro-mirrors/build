@@ -101,33 +101,39 @@ def legacy_source_root(root, build):
 
 def prepare_build(root, arguments):
     destination = root / MANIFEST
+    data = None
     if destination.exists():
         data = json.loads(destination.read_text())
-    else:
-        # Old CI snapshots have no content fingerprints. Preserve their path
-        # semantics, but do not claim that transferred input times can be reused.
-        request = build_request(arguments)
-        if not request.product_name:
-            return
+        if data.get('version') != 1:
+            raise ValueError('Unsupported manifest version')
+    request = build_request(arguments)
+    if request.product_name:
         build = root / 'out' / request.product_name.split('@', 1)[0]
-        if not (build / 'build.ninja').is_file():
-            return
         canonical, evidence = legacy_source_root(root, build)
-        if canonical is None or canonical == root:
-            return
-        print(f'incremental workspace: legacy root {canonical} from {evidence}; '
-              'source timestamp fingerprints are unavailable', flush=True)
-        data = {'version': 1, 'canonical_root': str(canonical),
-                'build_dir': str(build.relative_to(root)), 'target': 'make_all',
-                'files': {}, 'tools': {}, 'automatic': True, 'unsealed': True}
-        args = (build / 'args.gn').read_text() if (build / 'args.gn').is_file() else ''
-        for name, field in (('ohos_build_time', 'build_time'),
-                            ('ohos_build_datetime', 'build_datetime')):
-            match = re.search(r'^' + name + r'\s*=\s*(.*)$', args, re.M)
-            data[field] = match[1].strip('"') if match else ''
-        write_manifest(destination, data)
-    if data.get('version') != 1:
-        raise ValueError('Unsupported manifest version')
+        cache_evidence = evidence is not None and evidence.endswith('/CMakeCache.txt')
+        mismatch = (data is not None and cache_evidence
+                    and canonical != Path(data['canonical_root']))
+        legacy = (data is None and canonical is not None and canonical != root
+                  and (cache_evidence or (build / 'build.ninja').is_file()))
+        if mismatch or legacy:
+            if mismatch:
+                print(f'incremental workspace: manifest root {data["canonical_root"]} '
+                      f'disagrees with CMake root {canonical} from {evidence}', flush=True)
+            # A conflicting manifest cannot supply fingerprints for this cache.
+            # Recover paths without claiming that unknown input times are safe.
+            print(f'incremental workspace: legacy root {canonical} from {evidence}; '
+                  'source timestamp fingerprints are unavailable', flush=True)
+            data = {'version': 1, 'canonical_root': str(canonical),
+                    'build_dir': str(build.relative_to(root)), 'target': 'make_all',
+                    'files': {}, 'tools': {}, 'automatic': True, 'unsealed': True}
+            args = (build / 'args.gn').read_text() if (build / 'args.gn').is_file() else ''
+            for name, field in (('ohos_build_time', 'build_time'),
+                                ('ohos_build_datetime', 'build_datetime')):
+                match = re.search(r'^' + name + r'\s*=\s*(.*)$', args, re.M)
+                data[field] = match[1].strip('"') if match else ''
+            write_manifest(destination, data)
+    if data is None:
+        return
     if (data.get('automatic') and Path(data['canonical_root']) == root
             and data.get('origin_instance') == instance_identity(root)):
         print(f'incremental workspace: in-place build at {root}', flush=True)

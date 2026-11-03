@@ -33,6 +33,13 @@ roots for agreement, then falls back to out/ohos_config.json. This recovers old
 CI roots even when HB has already rewritten or removed ohos_config.json. It
 cannot restore source timestamps until a successful build records them. An
 old snapshot first patched after export may therefore do substantial real work.
+The cache check also runs before trusting an existing manifest's in-place
+shortcut. A consistent flatbuffers cache with a different root replaces that
+manifest with an unsealed path-only record; its unverified fingerprints are
+discarded. A remaining CMake cache can recover the root even if build.ninja was
+removed before GN regeneration. ohos_config.json alone still requires an
+existing product graph and never overrides an existing manifest. Unknown
+historical fingerprints do not provide a zero-work guarantee.
 Deleting out keeps the ordinary clean-build path and creates no namespace.
 Prebuilt inputs outside out must still be prepared with the project downloader;
 for example JSVM requires its pinned V8 library and headers under vendor/.
@@ -80,7 +87,7 @@ are specific to the tested workspace and host.
 python3 -m unittest discover -s build/test/incremental -p 'test_*.py' -v
 ```
 
-All 26 focused regressions passed, including three legacy/cold-entry cases.
+All 40 focused regressions passed, including seven legacy/cold-entry cases.
 A real CMake/Ninja fixture is built before installing the new entry, moved,
 and rebuilt through the production dispatch hook with missing or rewritten
 ohos_config.json. Both variants compile
