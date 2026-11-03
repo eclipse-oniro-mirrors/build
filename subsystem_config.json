@@ -242,5 +242,9 @@
   "soc_p7885": {
     "path": "device/soc/unisoc/p7885",
     "name": "soc_p7885"
+  },
+  "soc_rk3588": {
+    "path": "device/soc/rockchip/rk3588",
+    "name": "soc_rk3588"
   }
 }
