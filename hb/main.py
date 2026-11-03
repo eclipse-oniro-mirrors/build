@@ -29,8 +29,7 @@ import platform
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))  # ohos/build/hb dir
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # ohos/build dir
 sys.path.append(
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lite'))  
-# ohos/build/lite dir
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lite'))  # ohos/build/lite dir
 from dfx.build_tracker import build_tracker
 from containers.arg import Arg, ModuleType
 from containers.status import throw_exception, judge_indep
@@ -92,7 +91,6 @@ from util.system_util import SystemUtil
 
 
 class Main():
-
     @staticmethod
     @throw_exception
     @build_tracker(

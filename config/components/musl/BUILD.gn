@@ -53,7 +53,6 @@ config("soft_musl_config") {
 
     if (musl_arch == "arm") {
       cflags_basic += [ "-mtp=cp15" ]
-    } else if (musl_arch == "aarch64") {
     }
 
     cflags_auto = [

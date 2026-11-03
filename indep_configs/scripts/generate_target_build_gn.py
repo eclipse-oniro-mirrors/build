@@ -203,7 +203,7 @@ def process_build_target_list(build_target_list, module_to_path, deps_list):
             if item.startswith('/'):
                 add_to_deps_list(deps_list, item)
             else:
-                add_to_deps_list(deps_list, "//" + item)
+                add_to_deps_list(deps_list, f"//{item}")
         else:
             # 如果不是全路径，查找对应的module
             fullpath = module_to_path.get(item)

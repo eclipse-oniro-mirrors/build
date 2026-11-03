@@ -25,17 +25,15 @@ def summary_lcache(lcache_log: str):
     miss_str = "LINK_CACHE_MISS"
     if os.path.exists(lcache_log):
         try:
-            cmd = "grep -c '{}' '{}'".format(hit_str, lcache_log)
+            cmd = ['grep', '-c', hit_str, lcache_log]
             hit_num = int(
-                subprocess.Popen(cmd, shell=True,
-                                 stdout=subprocess.PIPE).communicate()[0])
+                subprocess.Popen(cmd, stdout=subprocess.PIPE).communicate()[0])
         except ValueError:
             hit_num = 0
         try:
-            cmd = "grep -c '{}' '{}'".format(miss_str, lcache_log)
+            cmd = ['grep', '-c', miss_str, lcache_log]
             miss_num = int(
-                subprocess.Popen(cmd, shell=True,
-                                 stdout=subprocess.PIPE).communicate()[0])
+                subprocess.Popen(cmd, stdout=subprocess.PIPE).communicate()[0])
         except ValueError:
             miss_num = 0
     total = hit_num + miss_num
