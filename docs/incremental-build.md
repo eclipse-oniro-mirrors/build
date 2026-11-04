@@ -17,6 +17,28 @@ refresh that record without collecting all Ninja inputs again. The trailing
 `incremental workspace:` messages report this bookkeeping. Single-target
 builds retain their requested targets and do not replace the full baseline.
 
+Successful full-product seals also atomically acknowledge the exact manifest
+in `out/incremental_workspace.restore-state.json`. The restore key includes the
+manifest content hash, host boot identity, root device/inode and physical path.
+Normal successful refreshes update this key, so the next build in the same
+physical workspace does not hash all transferred inputs again. A rename, copy,
+host change or imported manifest still triggers a conservative first check,
+including source changes that preserved their old modification times. Existing
+state without the physical-path field is checked once after upgrading.
+
+The normal mapped build entry validates each distinct tool file once; aliases
+share a digest only within that validation call. Direct restore still validates
+tools. Failed/interrupted builds do not acknowledge a new successful baseline.
+A restore-cache write failure warns and retains the conservative recheck path.
+
+Entry logs distinguish mountpoint preparation, mapped-root readiness, tool
+validation and input restore/skip. Full capture logs report its decision reason,
+Ninja audit/inputs/deps, input and tool fingerprinting, manifest write and total
+time. Long input scans report progress. These are bookkeeping phases; collecting
+Ninja inputs/deps does not execute compilation. Unchanged successful builds keep
+the existing fast refresh, with no full input/dependency recollection. Actual
+configuration, dependency or source-state changes still require a new capture.
+
 On a transferred workspace, identical inputs regain their recorded timestamps.
 Real edits, additions and deletions remain visible to Ninja, including edits
 made before the first local build. A private bubblewrap mount namespace presents

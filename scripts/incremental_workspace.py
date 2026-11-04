@@ -27,6 +27,13 @@ import sys
 import time
 
 MANIFEST = 'out/incremental_workspace.json'
+PHYSICAL_ROOT_ENV = 'OHOS_INCREMENTAL_PHYSICAL_ROOT'
+
+
+def phase(message, started=None):
+    if started is not None:
+        message += f' elapsed_s={time.perf_counter() - started:.3f}'
+    print(f'incremental workspace: {message}', flush=True)
 
 
 def instance_identity(root):
@@ -155,6 +162,7 @@ def only_optional_probe_executed(build):
 
 
 def finish_build(root, arguments):
+    started = time.perf_counter()
     request = build_request(arguments)
     if (not request.product_name or request.build_only_gn or request.build_only_load
             or request.build_target != ['make_all']):
@@ -167,6 +175,7 @@ def finish_build(root, arguments):
     identity = graph_identity(build)
     previous_graph = previous.get('graph_identity', {}) if previous else {}
     same_graph = previous_graph == identity
+    reason = 'no-baseline' if previous is None else 'graph-or-dependencies-changed'
     # GN rewrites large generated graphs even on a no-op. A successful Ninja
     # invocation with no material work, unchanged arguments/deps and unchanged
     # source stamps can refresh this identity without rediscovering all inputs.
@@ -183,6 +192,7 @@ def finish_build(root, arguments):
             if (not path.exists() or path.stat().st_mtime_ns != record['mtime_ns']
                     or bool(path.stat().st_mode & 0o111) != record.get('executable', bool(path.stat().st_mode & 0o111))):
                 unchanged = False
+                reason = f'input-state-changed:{name}'
                 break
         if unchanged:
             previous['graph_identity'] = identity
@@ -193,10 +203,23 @@ def finish_build(root, arguments):
                 match = re.search(r'^' + name + r'\s*=\s*(.*)$', args, re.M)
                 previous[field] = match[1].strip('"') if match else ''
             write_manifest(destination, previous)
-            print('incremental workspace: successful baseline refreshed (unchanged inputs)', flush=True)
+            acknowledge_successful_baseline(root)
+            phase('successful baseline refreshed (unchanged inputs)', started)
             return
+    if previous is not None:
+        if previous.get('canonical_root') != str(root):
+            reason = 'baseline-root-changed'
+        elif previous.get('build_dir') != str(build.relative_to(root)):
+            reason = 'build-directory-changed'
+        elif previous_graph.get('args') != identity.get('args'):
+            reason = 'gn-arguments-changed'
+        elif previous_graph.get('.ninja_deps') != identity.get('.ninja_deps'):
+            reason = 'ninja-dependencies-changed'
+    phase(f'full baseline capture reason={reason}')
     automatic = bool(previous.get('automatic')) if previous else True
     capture(root, build, 'make_all', True, automatic=automatic)
+    acknowledge_successful_baseline(root)
+    phase('successful baseline recorded', started)
 
 
 def digest(path):
@@ -238,12 +261,26 @@ def tool_identities(root):
 
 
 def validate_tools(root, data):
+    started = time.perf_counter()
+    hashes = {}
+    phase(f'validating tools entries={len(data.get("tools", {}))}')
     for name, expected in data.get('tools', {}).items():
         if Path(name).is_absolute() or '..' in Path(name).parts:
             raise ValueError(f'Invalid tool path: {name}')
         path = root / name
-        if not path.is_file() or digest(path) != expected:
+        if not path.is_file():
             raise RuntimeError(f'Toolchain changed: {name}; create a matching build baseline before reusing this snapshot')
+        stat = path.stat()
+        key = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        if key not in hashes:
+            phase(f'hashing tool {name} bytes={stat.st_size}')
+            hashes[key] = digest(path)
+            after = path.stat()
+            if key != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise RuntimeError(f'Toolchain changed while validating: {name}')
+        if hashes[key] != expected:
+            raise RuntimeError(f'Toolchain changed: {name}; create a matching build baseline before reusing this snapshot')
+    phase(f'tools validated unique_files={len(hashes)} bytes_hashed={sum(key[2] for key in hashes)}', started)
 
 
 def ninja_command(root, build, *args):
@@ -260,26 +297,37 @@ def audit(root, build, target):
 
 
 def capture(root, build, target, allow_dirty, manifest=None, automatic=False):
+    started = time.perf_counter()
     print('incremental workspace: recording successful build baseline', flush=True)
+    phase('auditing Ninja baseline')
+    audit_started = time.perf_counter()
     code, count, output = audit(root, build, target)
+    phase(f'Ninja audit complete planned={count}', audit_started)
     if code or (count and not allow_dirty):
         raise RuntimeError(f'Cannot seal a clean baseline: exit={code}, planned={count}.\n' + output[-4000:])
     paths = set()
     for tool in ('inputs', 'deps'):
+        collect_started = time.perf_counter()
         print(f'incremental workspace: collecting Ninja {tool}', flush=True)
         p = subprocess.Popen(ninja_command(root, build, '-t', tool, *([target] if tool == 'inputs' else [])),
                              text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        for line in p.stdout:
-            if tool == 'deps' and not line.startswith('    '):
-                continue
-            paths.add(line.strip())
+        next_report = time.perf_counter() + 2
+        for lines, line in enumerate(p.stdout, 1):
+            if tool != 'deps' or line.startswith('    '):
+                paths.add(line.strip())
+            if lines % 1024 == 0 and time.perf_counter() >= next_report:
+                phase(f'collecting Ninja {tool} lines={lines} unique_paths={len(paths)}', collect_started)
+                next_report = time.perf_counter() + 2
         if p.wait():
             raise RuntimeError(f'ninja -t {tool} failed')
+        phase(f'Ninja {tool} collected unique_paths={len(paths)}', collect_started)
     depfile = build / 'build.ninja.d'
     if depfile.exists():
         deps = depfile.read_text().replace('\\\n', '')
         paths.update(shlex.split(deps.split(': ', 1)[-1]))
     files = {}
+    fingerprint_started = time.perf_counter()
+    next_report = fingerprint_started + 2
     next_progress = 50000
     for value in sorted(paths):
         path = Path(os.path.abspath(build / value)).resolve()
@@ -296,9 +344,12 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False):
         files[str(relative)] = {'sha256': directory_digest(path) if kind == 'directory' else digest(path),
                                 'kind': kind, 'mtime_ns': stat.st_mtime_ns,
                                 'executable': bool(stat.st_mode & 0o111)}
-        if len(files) >= next_progress:
+        now = time.perf_counter()
+        if len(files) >= next_progress or now >= next_report:
             print(f'incremental workspace: fingerprinted {len(files)} source inputs', flush=True)
-            next_progress += 50000
+            next_progress = (len(files) // 50000 + 1) * 50000
+            next_report = now + 2
+    phase(f'input fingerprints complete inputs={len(files)}', fingerprint_started)
     args = (build / 'args.gn').read_text() if (build / 'args.gn').exists() else ''
     def value(name):
         match = re.search(r'^' + name + r'\s*=\s*(.*)$', args, re.M)
@@ -311,25 +362,38 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False):
                 fields = line.split('\t')
                 if len(fields) >= 3 and fields[2].isdigit():
                     ceiling = max(ceiling, int(fields[2]))
+    tool_started = time.perf_counter()
+    phase('fingerprinting baseline tools')
+    tools = tool_identities(root)
+    phase('baseline tools fingerprinted', tool_started)
     data = {'version': 1, 'canonical_root': str(root), 'build_dir': str(build.relative_to(root)),
             'target': target, 'baseline_planned': count, 'files': files, 'mtime_ceiling_ns': ceiling,
-            'tools': tool_identities(root),
+            'tools': tools,
             'build_time': value('ohos_build_time'), 'build_datetime': value('ohos_build_datetime'),
             'automatic': automatic, 'origin_instance': instance_identity(root),
             'graph_identity': graph_identity(build)}
     destination = root / (manifest or MANIFEST)
+    save_started = time.perf_counter()
+    phase('writing baseline manifest')
     write_manifest(destination, data)
+    phase('baseline manifest written', save_started)
     print(json.dumps({'manifest': str(destination), 'source_inputs': len(files), 'baseline_planned': count}))
+    phase('baseline capture complete', started)
 
 
-def restore(root, data):
+def restore(root, data, *, tools_validated=False):
     canonical = Path(data['canonical_root']) if 'canonical_root' in data else root
     if root != canonical:
         enter(root, data, ['python3', 'build/scripts/incremental_workspace.py',
                            '--root', str(canonical), 'restore'])
-    validate_tools(root, data)
+    if not tools_validated:
+        validate_tools(root, data)
+    started = time.perf_counter()
+    total = len(data['files'])
+    phase(f'restoring transferred inputs total={total}')
+    next_report = started + 2
     counts = {'restored': 0, 'changed': 0, 'missing': 0}
-    for name, record in data['files'].items():
+    for processed, (name, record) in enumerate(data['files'].items(), 1):
         path = root / name
         # Reject traversal even for manifests provided with external snapshots.
         if (Path(name).is_absolute() or '..' in Path(name).parts or path.is_symlink()
@@ -351,23 +415,50 @@ def restore(root, data):
             if st.st_mtime_ns != record['mtime_ns']:
                 os.utime(path, ns=(st.st_atime_ns, record['mtime_ns']))
                 counts['restored'] += 1
+        now = time.perf_counter()
+        if now >= next_report:
+            phase(f'input restore progress={processed}/{total}', started)
+            next_report = now + 2
     print(json.dumps(counts))
+    phase(f'input restore complete inputs={total}', started)
 
 
-def restore_transferred_snapshot(root, data):
-    """Restore once per transferred baseline, never retouch later local edits."""
-    stat = root.stat()
-    boot_id = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-    identity = {'manifest_sha256': digest(root / MANIFEST), 'boot_id': boot_id,
-                'device': stat.st_dev, 'inode': stat.st_ino}
+def restore_identity(root):
+    return {'manifest_sha256': digest(root / MANIFEST), **instance_identity(root),
+            'physical_root': os.environ.get(PHYSICAL_ROOT_ENV, str(root))}
+
+
+def acknowledge_successful_baseline(root):
+    # Only finish's successful full-product branches acknowledge a newly sealed
+    # manifest. A changed/imported manifest must still invalidate this cache.
+    write_restore_state(root, restore_identity(root))
+
+
+def write_restore_state(root, identity):
+    try:
+        write_manifest(root / 'out/incremental_workspace.restore-state.json', identity)
+    except OSError as error:
+        # The manifest remains valid. A stale/missing cache causes a conservative
+        # recheck next time; it must not turn a successful product into failure.
+        phase(f'warning: cannot save input restore state; next entry will recheck: {error}')
+
+
+def restore_transferred_snapshot(root, data, *, tools_validated=False):
+    """Restore once per baseline and physical path, preserving later edits."""
+    started = time.perf_counter()
+    identity = restore_identity(root)
     state = root / 'out/incremental_workspace.restore-state.json'
     try:
         previous = json.loads(state.read_text())
     except (FileNotFoundError, ValueError):
         previous = None
     if previous != identity:
-        restore(root, data)
-        state.write_text(json.dumps(identity) + '\n')
+        reason = 'state-missing-or-invalid' if previous is None else 'baseline-or-instance-changed'
+        phase(f'input restore required reason={reason}')
+        restore(root, data, tools_validated=tools_validated)
+        write_restore_state(root, identity)
+    else:
+        phase('input restore skipped reason=baseline-and-instance-match', started)
 
 
 def private_mountpoint(canonical):
@@ -458,13 +549,17 @@ def enter(root, data, command):
         identity = f'{root}:{stat.st_dev}:{stat.st_ino}'
         env['CCACHE_LOG_SUFFIX'] = 'incremental-' + hashlib.sha256(identity.encode()).hexdigest()[:16]
     if root == canonical:
+        phase('mapped workspace ready')
         validate_tools(root, data)
-        restore_transferred_snapshot(root, data)
+        restore_transferred_snapshot(root, data, tools_validated=True)
         os.chdir(root)
         os.execvpe(command[0], command, env)
     ensure_bwrap()
+    env[PHYSICAL_ROOT_ENV] = str(root)
+    started = time.perf_counter()
     print(f'incremental workspace: mapping {root} to {canonical}', flush=True)
     mountpoint_args = private_mountpoint(canonical)
+    phase('private mountpoint prepared', started)
     # Validate tools inside the mapped root: absolute CI symlinks can be
     # intentionally unresolved in the physical checkout before this bind.
     checked_command = ['python3', 'build/scripts/incremental_workspace.py',

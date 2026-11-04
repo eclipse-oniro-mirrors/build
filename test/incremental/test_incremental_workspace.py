@@ -138,6 +138,16 @@ python3 "$SOURCE_ROOT_DIR/build/scripts/incremental_workspace.py" --root "$SOURC
             self.assertIn('no work to do', output)
             self.assertFalse(ci.exists(), 'Mapping must not leave a host mountpoint')
             self.command([local / 'out/wukong100/probe'], expect=1)
+            for _ in range(3):
+                graph = local / 'out/wukong100/build.ninja'
+                stat = graph.stat()
+                os.utime(graph, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1000000))
+                output = self.command([local / 'build.sh', *arguments])
+                self.assertIn('input restore skipped reason=baseline-and-instance-match', output)
+                self.assertIn('unchanged inputs', output)
+                self.assertNotIn('restoring transferred inputs', output)
+                self.assertNotIn('collecting Ninja inputs', output)
+                self.assertIn('no work to do', output)
             (local / 'header.h').write_text('#define VALUE 2\n')
             output = self.command([local / 'build.sh', *arguments])
             self.assertIn('[1/1]', output)
