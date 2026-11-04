@@ -218,7 +218,7 @@ def main(args):
     if not options.js_assets_dir and not options.ets_assets_dir:
         with ZipFile(options.output, 'w'):
             pass
-        build_utils.write_depfile(options.depfile, options.output, [])
+        build_utils.write_depfile(options.depfile, options.output, [], relative_inputs=True)
         return
 
     if options.ark_es2abc_dir:
@@ -276,7 +276,8 @@ def main(args):
             input_strings=cmd + [options.build_mode],
             output_paths=([options.output]),
             force=False,
-            add_pydeps=False)
+            add_pydeps=False,
+            relative_inputs=True)
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv[1:]))

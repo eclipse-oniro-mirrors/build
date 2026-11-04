@@ -233,7 +233,8 @@ def record_dependencies(options):
     primary_output = os.path.join(options.output_interface_sdk, OUT_ROOT_LIST[0],
                                   API_PATH, "bundle/bundleStatusCallback.d.ts")
     dependencies.discard(primary_output)
-    write_depfile(options.depfile, primary_output, sorted(dependencies), add_pydeps=False)
+    write_depfile(options.depfile, primary_output, sorted(dependencies), add_pydeps=False,
+                  relative_inputs=True)
 
 
 def main():

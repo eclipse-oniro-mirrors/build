@@ -11,6 +11,7 @@
 # limitations under the License.
 """SDK filtering must settle without hiding lost files or changed API inputs."""
 from pathlib import Path
+import os
 import shlex
 import subprocess
 import tempfile
@@ -45,6 +46,8 @@ class SdkCopyTest(unittest.TestCase):
                 return result.stdout
 
             build()
+            inputs = depfile.read_text().split(': ', 1)[1]
+            self.assertTrue(all(not os.path.isabs(path) for path in shlex.split(inputs)))
             self.assertFalse((output / '@internal').exists())
             self.assertIn('no work to do', build())
             (output / 'public.d.ts').unlink()

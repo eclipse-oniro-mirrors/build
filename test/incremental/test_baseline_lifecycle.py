@@ -49,7 +49,8 @@ class BaselineLifecycleTest(unittest.TestCase):
         data = {'version': 1, 'canonical_root': str(self.root), 'build_dir': 'out/probe',
                 'target': 'make_all', 'automatic': True, 'tools': {},
                 'origin_instance': {'boot_id': 'producer', 'device': 0, 'inode': 0},
-                'files': {'input.h': self.record()}, 'graph_identity': workspace.graph_identity(self.build)}
+                'files': {'input.h': self.record()}, 'graph_identity': workspace.graph_identity(self.build),
+                'depfile_inputs_version': workspace.DEPFILE_INPUTS_VERSION, 'retained_depfiles': {}}
         self.manifest = self.root / workspace.MANIFEST
         self.state = self.root / 'out/incremental_workspace.restore-state.json'
         workspace.write_manifest(self.manifest, data)
@@ -178,6 +179,37 @@ class BaselineLifecycleTest(unittest.TestCase):
             capture.assert_not_called()
         self.assertFalse(self.state.exists())
         self.assertEqual(self.manifest.read_bytes(), original)
+
+    def test_retained_depfile_time_refresh_is_fast_but_content_change_recaptures(self):
+        path = self.build / 'kept.d'
+        path.write_text('program: input.h\n')
+        stat = path.stat()
+        data = self.data()
+        data['retained_depfiles'] = {'kept.d': [stat.st_size, stat.st_mtime_ns, workspace.digest(path)]}
+        workspace.write_manifest(self.manifest, data)
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1000000))
+        with mock.patch.object(workspace, 'capture', side_effect=AssertionError('unexpected full capture')):
+            workspace.finish_build(self.root, ARGUMENTS)
+        self.assertEqual(self.data()['retained_depfiles']['kept.d'][1], path.stat().st_mtime_ns)
+        path.write_text('program: input.h another.h\n')
+        with mock.patch.object(workspace, 'capture', side_effect=RuntimeError('expected recapture')) as capture:
+            with self.assertRaisesRegex(RuntimeError, 'expected recapture'):
+                workspace.finish_build(self.root, ARGUMENTS)
+            capture.assert_called_once()
+
+    def test_old_depfile_inventory_requires_one_upgrade_capture(self):
+        data = self.data()
+        data.pop('depfile_inputs_version')
+        workspace.write_manifest(self.manifest, data)
+
+        def capture(*args, **kwargs):
+            data['depfile_inputs_version'] = workspace.DEPFILE_INPUTS_VERSION
+            workspace.write_manifest(self.manifest, data)
+
+        with mock.patch.object(workspace, 'capture', side_effect=capture) as seal:
+            workspace.finish_build(self.root, ARGUMENTS)
+            workspace.finish_build(self.root, ARGUMENTS)
+            seal.assert_called_once()
 
     def test_failed_atomic_state_replace_keeps_the_old_complete_file(self):
         workspace.restore_transferred_snapshot(self.root, self.data())

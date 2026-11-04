@@ -81,7 +81,8 @@ def main():
         build_utils.write_depfile(args.depfile,
                                  args.binary_installed_info_file,
                                  _dep_files,
-                                 add_pydeps=False)
+                                 add_pydeps=False,
+                                 relative_inputs=True)
     return 0
 
 

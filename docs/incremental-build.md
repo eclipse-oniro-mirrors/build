@@ -39,6 +39,24 @@ Ninja inputs/deps does not execute compilation. Unchanged successful builds keep
 the existing fast refresh, with no full input/dependency recollection. Actual
 configuration, dependency or source-state changes still require a new capture.
 
+The incremental helpers write their depfile input lists relative to Ninja's
+working directory, not to the directory containing the .d file. Output target
+spelling remains unchanged to match the build graph. The shared writer keeps
+its original default; only these helpers opt in. SDK copy, standard-library
+and SELinux helpers perform the same conversion locally and retain their
+existing build-utility API. Paths on different Windows drives keep their
+original spelling when no relative path exists.
+
+Full capture also records reachable retained action depfiles, including their
+transitive input closure. Ninja's inputs tool is asked for unescaped paths so
+spaces are not mistaken for shell quoting. Old inventories upgrade once at a
+successful full capture. Stable finishes check known depfile metadata; a
+timestamp-only rewrite with identical bytes refreshes that metadata without
+recollecting all inputs. A changed dependency list requires a new capture.
+This inventory does not rewrite .ninja_deps, and compiler-produced depfiles
+remain controlled by their original compiler rules. Relative depfiles do not
+remove the need to map existing absolute build commands and CMake paths.
+
 On a transferred workspace, identical inputs regain their recorded timestamps.
 Real edits, additions and deletions remain visible to Ninja, including edits
 made before the first local build. A private bubblewrap mount namespace presents

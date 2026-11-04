@@ -122,7 +122,7 @@ def main(args):
                 raise RuntimeError(f'Signer did not produce {output}')
     if options.depfile:
         build_utils.write_depfile(options.depfile, options.stamp or signed_outputs[0],
-                                 dependencies + signed_outputs)
+                                 dependencies + signed_outputs, relative_inputs=True)
     if options.stamp:
         os.makedirs(os.path.dirname(os.path.abspath(options.stamp)), exist_ok=True)
         with open(options.stamp, 'w', encoding='utf-8'):

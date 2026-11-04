@@ -15,12 +15,12 @@ This tool never rewrites Ninja hashes/deps or pretends missing outputs exist.
 Transfer out/ with nanosecond mtimes, symlinks and both Ninja state files intact.
 """
 import argparse
+from collections import deque
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -28,6 +28,7 @@ import time
 
 MANIFEST = 'out/incremental_workspace.json'
 PHYSICAL_ROOT_ENV = 'OHOS_INCREMENTAL_PHYSICAL_ROOT'
+DEPFILE_INPUTS_VERSION = 1
 
 
 def phase(message, started=None):
@@ -175,6 +176,7 @@ def finish_build(root, arguments):
     identity = graph_identity(build)
     previous_graph = previous.get('graph_identity', {}) if previous else {}
     same_graph = previous_graph == identity
+    complete_inputs = previous is not None and previous.get('depfile_inputs_version') == DEPFILE_INPUTS_VERSION
     reason = 'no-baseline' if previous is None else 'graph-or-dependencies-changed'
     # GN rewrites large generated graphs even on a no-op. A successful Ninja
     # invocation with no material work, unchanged arguments/deps and unchanged
@@ -185,7 +187,7 @@ def finish_build(root, arguments):
         same_graph = True
     if (previous and previous.get('canonical_root') == str(root)
             and previous.get('build_dir') == str(build.relative_to(root))
-            and same_graph):
+            and same_graph and complete_inputs):
         unchanged = True
         for name, record in previous['files'].items():
             path = root / name
@@ -194,6 +196,22 @@ def finish_build(root, arguments):
                 unchanged = False
                 reason = f'input-state-changed:{name}'
                 break
+        retained = previous.get('retained_depfiles', {})
+        if unchanged:
+            for name, record in retained.items():
+                path = build / name
+                if Path(name).is_absolute() or '..' in Path(name).parts or not path.is_file():
+                    unchanged = False
+                else:
+                    stat = path.stat()
+                    if [stat.st_size, stat.st_mtime_ns] != record[:2]:
+                        if digest(path) != record[2]:
+                            unchanged = False
+                        else:
+                            retained[name] = [stat.st_size, stat.st_mtime_ns, record[2]]
+                if not unchanged:
+                    reason = f'retained-depfile-changed:{name}'
+                    break
         if unchanged:
             previous['graph_identity'] = identity
             previous['origin_instance'] = instance_identity(root)
@@ -207,7 +225,9 @@ def finish_build(root, arguments):
             phase('successful baseline refreshed (unchanged inputs)', started)
             return
     if previous is not None:
-        if previous.get('canonical_root') != str(root):
+        if not complete_inputs:
+            reason = 'upgrade-retained-depfile-inputs'
+        elif previous.get('canonical_root') != str(root):
             reason = 'baseline-root-changed'
         elif previous.get('build_dir') != str(build.relative_to(root)):
             reason = 'build-directory-changed'
@@ -296,6 +316,100 @@ def audit(root, build, target):
     return p.returncode, len(steps), p.stdout
 
 
+def depfile_words(text):
+    """Decode Make depfile words; quotes are filenames, not shell syntax."""
+    words, word = [], []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == '\\' and index + 1 < len(text) and text[index + 1] in ' \t#\\:':
+            word.append(text[index + 1])
+            index += 2
+            continue
+        if char == '$' and text[index:index + 2] == '$$':
+            word.append('$')
+            index += 2
+            continue
+        if char == '#':
+            break
+        if char.isspace():
+            if word:
+                words.append(''.join(word))
+                word = []
+        else:
+            word.append(char)
+        index += 1
+    if word:
+        words.append(''.join(word))
+    return words
+
+
+def depfile_rules(text):
+    for line in text.replace('\\\r\n', ' ').replace('\\\n', ' ').splitlines():
+        escaped = False
+        for index, char in enumerate(line):
+            if escaped:
+                escaped = False
+                continue
+            if char == '\\':
+                escaped = True
+            elif char == '#':
+                break
+            elif char == ':':
+                # A Windows drive letter is not the rule separator.
+                if (index > 0 and line[index - 1].isalpha()
+                        and (index == 1 or line[index - 2].isspace())
+                        and line[index + 1:index + 2] in ('/', '\\')):
+                    continue
+                yield depfile_words(line[:index]), depfile_words(line[index + 1:])
+                break
+
+
+def collect_retained_depfiles(build, paths, target):
+    """Ninja's inputs/deps tools do not load retained action depfiles."""
+    started = time.perf_counter()
+    phase('collecting retained action depfiles')
+    known = {os.path.abspath(build / path) for path in paths | {target}}
+    records, producers = {}, {}
+    excluded = {'.cache', 'lsp-portable', '.clangd-lsp-work', '.git'}
+    scanned, next_report = 0, time.perf_counter() + 2
+    for directory, directories, files in os.walk(build):
+        scanned += 1
+        directories[:] = [name for name in directories if name not in excluded]
+        for name in files:
+            if not name.endswith('.d'):
+                continue
+            path = Path(directory) / name
+            content = path.read_bytes()
+            for outputs, inputs in depfile_rules(content.decode('utf-8', errors='replace')):
+                if not inputs:
+                    continue  # GCC -MP's empty header rules are not producers.
+                for output in outputs:
+                    producers.setdefault(os.path.abspath(build / output), set()).add(path)
+        if time.perf_counter() >= next_report:
+            phase(f'retained depfile scan directories={scanned} output_keys={len(producers)}', started)
+            next_report = time.perf_counter() + 2
+    pending, loaded = deque(known), set()
+    while pending:
+        for path in producers.get(pending.popleft(), ()):
+            if path in loaded:
+                continue
+            loaded.add(path)
+            content = path.read_bytes()
+            for _, inputs in depfile_rules(content.decode('utf-8', errors='replace')):
+                paths.update(inputs)
+                for value in inputs:
+                    absolute = os.path.abspath(build / value)
+                    if absolute not in known:
+                        known.add(absolute)
+                        pending.append(absolute)
+            stat = path.stat()
+            records[str(path.relative_to(build))] = [stat.st_size, stat.st_mtime_ns,
+                                                     hashlib.sha256(content).hexdigest()]
+    phase(f'retained depfiles collected files={len(records)}', started)
+    return records
+
+
 def capture(root, build, target, allow_dirty, manifest=None, automatic=False):
     started = time.perf_counter()
     print('incremental workspace: recording successful build baseline', flush=True)
@@ -309,7 +423,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False):
     for tool in ('inputs', 'deps'):
         collect_started = time.perf_counter()
         print(f'incremental workspace: collecting Ninja {tool}', flush=True)
-        p = subprocess.Popen(ninja_command(root, build, '-t', tool, *([target] if tool == 'inputs' else [])),
+        p = subprocess.Popen(ninja_command(root, build, '-t', tool, *(['-E', target] if tool == 'inputs' else [])),
                              text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         next_report = time.perf_counter() + 2
         for lines, line in enumerate(p.stdout, 1):
@@ -323,8 +437,9 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False):
         phase(f'Ninja {tool} collected unique_paths={len(paths)}', collect_started)
     depfile = build / 'build.ninja.d'
     if depfile.exists():
-        deps = depfile.read_text().replace('\\\n', '')
-        paths.update(shlex.split(deps.split(': ', 1)[-1]))
+        for _, inputs in depfile_rules(depfile.read_text()):
+            paths.update(inputs)
+    retained = collect_retained_depfiles(build, paths, target)
     files = {}
     fingerprint_started = time.perf_counter()
     next_report = fingerprint_started + 2
@@ -371,7 +486,8 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False):
             'tools': tools,
             'build_time': value('ohos_build_time'), 'build_datetime': value('ohos_build_datetime'),
             'automatic': automatic, 'origin_instance': instance_identity(root),
-            'graph_identity': graph_identity(build)}
+            'graph_identity': graph_identity(build),
+            'depfile_inputs_version': DEPFILE_INPUTS_VERSION, 'retained_depfiles': retained}
     destination = root / (manifest or MANIFEST)
     save_started = time.perf_counter()
     phase('writing baseline manifest')

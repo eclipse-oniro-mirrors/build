@@ -348,7 +348,7 @@ def main():
     depfiles = [item for item in depfiles if item not in sa_files]
     depfiles.append(args.merged_sa_profile)
     build_utils.write_depfile(args.depfile, args.install_modules_info_file,
-                              depfiles)
+                              depfiles, relative_inputs=True)
     
     BootPathCollection.run(args.system_dir)
     return 0

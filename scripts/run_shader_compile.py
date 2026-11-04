@@ -43,7 +43,8 @@ def main():
     if len(command) > 1:
         generated = Path(command[1])
         dependencies.update(str(p) for p in generated.rglob('*') if p.is_file())
-    build_utils.write_depfile(args.depfile, args.stamp, sorted(dependencies))
+    build_utils.write_depfile(args.depfile, args.stamp, sorted(dependencies),
+                             relative_inputs=True)
     stamp = Path(args.stamp)
     stamp.parent.mkdir(parents=True, exist_ok=True)
     stamp.touch()

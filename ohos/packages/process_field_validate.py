@@ -354,7 +354,8 @@ def main():
                                     if name.endswith('.cfg'))
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
         from scripts.util.build_utils import write_depfile
-        write_depfile(depfile, result_path, sorted(dependencies), add_pydeps=False)
+        write_depfile(depfile, result_path, sorted(dependencies), add_pydeps=False,
+                      relative_inputs=True)
     if result_path:
         os.makedirs(os.path.dirname(os.path.abspath(result_path)), exist_ok=True)
         with open(result_path, 'w'):
