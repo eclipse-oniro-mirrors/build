@@ -218,24 +218,77 @@ python3 "$SOURCE_ROOT_DIR/build/scripts/incremental_workspace.py" --root "$SOURC
                 locked.chmod(0o700)
             self.assertEqual(list(locked.iterdir()), [])
 
-    def test_reject_nonempty_mountpoint(self):
-        with tempfile.TemporaryDirectory() as td:
-            root=Path(td)/'local';root.mkdir()
-            canonical=Path(td)/'ci';canonical.mkdir();(canonical/'important').touch()
-            with self.assertRaises(RuntimeError):
-                workspace.enter(root, {'canonical_root':str(canonical)}, ['true'])
+    def test_nonempty_mountpoint_is_private_and_host_files_are_preserved(self):
+        self.mountpoint_preservation(symlink=False)
+
+    def test_symlink_mountpoint_does_not_resolve_to_another_job(self):
+        self.mountpoint_preservation(symlink=True)
+
+    def mountpoint_preservation(self, symlink):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'local'
+            canonical = Path(temporary) / 'ci'
+            host = Path(temporary) / 'previous-job' if symlink else canonical
+            (host / 'out').mkdir(parents=True)
+            (host / 'source.txt').write_text('HOST')
+            (host / 'out/result.txt').write_text('HOST OUTPUT')
+            (host / 'host-only.txt').write_text('preserve me')
+            if symlink:
+                canonical.symlink_to(host, target_is_directory=True)
+            before = {str(p.relative_to(host)): (p.read_bytes(), p.stat().st_mtime_ns)
+                      for p in host.rglob('*') if p.is_file()}
+            (root / 'build/scripts').mkdir(parents=True)
+            (root / 'out').mkdir()
+            shutil.copy2(TOOL, root / 'build/scripts/incremental_workspace.py')
+            (root / 'source.txt').write_text('CONSUMER')
+            (root / workspace.MANIFEST).write_text(json.dumps({
+                'version': 1, 'canonical_root': str(canonical), 'files': {}, 'tools': {}}))
+            probe = ('from pathlib import Path;import sys;root=Path(sys.argv[1]);'
+                     'assert not root.is_symlink();assert root.resolve()==root;'
+                     'assert (root/"source.txt").read_text()=="CONSUMER";'
+                     'assert not (root/"host-only.txt").exists();'
+                     '(root/"out/result.txt").write_text("CONSUMER OUTPUT")')
+            self.command(['python3', TOOL, '--root', root, 'enter', '--',
+                          'python3', '-c', probe, canonical])
+            self.assertEqual((root / 'out/result.txt').read_text(), 'CONSUMER OUTPUT')
+            after = {str(p.relative_to(host)): (p.read_bytes(), p.stat().st_mtime_ns)
+                     for p in host.rglob('*') if p.is_file()}
+            self.assertEqual(before, after)
+            if symlink:
+                self.assertEqual(os.readlink(canonical), str(host))
 
     def test_two_concurrent_workspaces_share_canonical_name_without_cross_writes(self):
+        for occupied in (False, True, 'symlink'):
+            with self.subTest(occupied=occupied):
+                self.concurrent_workspaces(occupied)
+
+    def concurrent_workspaces(self, occupied):
         with tempfile.TemporaryDirectory(prefix='oh-concurrent-snapshots-') as temporary:
             home = Path(temporary)
             canonical = home / 'ci'
-            canonical.mkdir()
-            release = home / 'release'
+            host = home / 'previous-job' if occupied == 'symlink' else canonical
+            host.mkdir()
+            if occupied == 'symlink':
+                canonical.symlink_to(host, target_is_directory=True)
+            if occupied:
+                (host / 'source.txt').write_text('HOST')
+                (host / 'out').mkdir()
+                (host / 'out/same-output.txt').write_text('HOST OUTPUT')
+            before = {str(p.relative_to(host)): (p.read_bytes(), p.stat().st_mtime_ns)
+                      for p in host.rglob('*') if p.is_file()}
+            # Parent replacement snapshots its existing children. Put the
+            # barrier in a pre-existing bound directory so later writes remain
+            # visible without relying on new siblings appearing in that parent.
+            control = home / 'control'
+            control.mkdir()
+            release = control / 'release'
             roots = [home / 'local-a', home / 'local-b']
             processes = []
             probe = '''from pathlib import Path
 import os,sys,time
 root,expected,release=Path(sys.argv[1]),sys.argv[2],Path(sys.argv[3])
+assert not root.is_symlink()
+assert root.resolve()==root
 assert (root/'source.txt').read_text()==expected
 (root/'ready').write_text(expected)
 (root/'out/cache-suffix').write_text(os.environ['CCACHE_LOG_SUFFIX'])
@@ -280,7 +333,11 @@ assert (root/'out/same-output.txt').read_text()==expected
                 self.assertEqual((roots[1] / 'out/same-output.txt').read_text(), 'B')
                 self.assertNotEqual((roots[0] / 'out/cache-suffix').read_text(),
                                     (roots[1] / 'out/cache-suffix').read_text())
-                self.assertEqual(list(canonical.iterdir()), [])
+                after = {str(p.relative_to(host)): (p.read_bytes(), p.stat().st_mtime_ns)
+                         for p in host.rglob('*') if p.is_file()}
+                self.assertEqual(before, after)
+                if occupied == 'symlink':
+                    self.assertEqual(os.readlink(canonical), str(host))
             finally:
                 for process in processes:
                     if process.poll() is None:

@@ -371,13 +371,16 @@ def restore_transferred_snapshot(root, data):
 
 
 def private_mountpoint(canonical):
+    replace_symlink = False
     try:
+        replace_symlink = canonical.is_symlink()
         exists = canonical.is_dir()
     except PermissionError:
         exists = False
-    if exists:
-        if any(canonical.iterdir()):
-            raise RuntimeError(f'Canonical mountpoint is occupied: {canonical}')
+    if exists and not replace_symlink:
+        # The bind below shadows this directory only inside bubblewrap's
+        # private mount namespace. A retained preheat workspace may be nonempty;
+        # neither it nor another consumer's namespace is modified by this bind.
         return []
     # Present a missing CI path only inside this namespace. Rebind existing
     # siblings to preserve HOME/tools, without creating host mount directories.
@@ -397,6 +400,10 @@ def private_mountpoint(canonical):
         # Its private namespace replacement needs no inaccessible siblings.
         children = []
     for child in children:
+        if replace_symlink and child == canonical:
+            # Replace a stale job alias with a directory only in this private
+            # parent. Keep the host link and its previous-job target untouched.
+            continue
         if child.is_symlink():
             args += ['--symlink', os.readlink(child), str(child)]
         elif child.is_file() and child.stat().st_size <= 16 * 1024 * 1024 and os.access(child, os.W_OK):

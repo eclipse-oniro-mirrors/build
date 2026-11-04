@@ -113,6 +113,28 @@ python3 "$SOURCE_ROOT_DIR/build/scripts/incremental_workspace.py" --root "$SOURC
             enter.assert_not_called()
             self.assertFalse((root / 'out').exists())
 
+    def test_consumer_rebuild_preserves_populated_preheat_workspace(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ci, local = Path(temporary) / 'preheat', Path(temporary) / 'consumer'
+            self.fixture(ci)
+            arguments = ['--product-name', 'wukong100', '--build-target', 'make_all', '--ccache']
+            self.run_command([ci / 'build.sh', *arguments], ci)
+            shutil.copytree(ci, local, symlinks=True)
+            before = {str(p.relative_to(ci)): (p.read_bytes(), p.stat().st_mtime_ns)
+                      for p in ci.rglob('*') if p.is_file() and not p.is_symlink()}
+            (local / 'third_party/flatbuffers/main.c').write_text('int main(void) { return 9; }\n')
+            output = self.run_command([local / 'build.sh', *arguments], local)
+            self.assertIn('mapping', output)
+            self.assertNotIn('CMake Error', output)
+            binary = 'out/wukong100/clang_x64/third_party/flatbuffers/flatc'
+            self.assertEqual(subprocess.run([str(local / binary)]).returncode, 9)
+            self.assertEqual(subprocess.run([str(ci / binary)]).returncode, 0)
+            again = self.run_command([local / 'build.sh', *arguments], local)
+            self.assertIn('no work to do', again)
+            after = {str(p.relative_to(ci)): (p.read_bytes(), p.stat().st_mtime_ns)
+                     for p in ci.rglob('*') if p.is_file() and not p.is_symlink()}
+            self.assertEqual(before, after)
+
     def test_existing_local_manifest_cannot_override_imported_cmake_cache(self):
         with tempfile.TemporaryDirectory() as temporary:
             ci, local = Path(temporary) / 'preheat', Path(temporary) / 'consumer'

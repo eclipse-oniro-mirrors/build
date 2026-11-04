@@ -22,7 +22,11 @@ Real edits, additions and deletions remain visible to Ninja, including edits
 made before the first local build. A private bubblewrap mount namespace presents
 the imported workspace at its original logical root. The host does not acquire
 a placeholder directory. Independent copies use separate namespaces, baselines
-and ccache log suffixes. An occupied, nonempty original root is rejected.
+and ccache log suffixes. A retained, nonempty original root is shadowed only
+inside the consumer's mount namespace; its host files remain unchanged.
+If the original root itself is a symlink to another job, its parent is recreated
+privately and that link is replaced by a directory only in the child namespace.
+The host symlink and its target are not changed or used as consumer output.
 
 Install bubblewrap on Linux before relocating a workspace. Ordinary in-place
 builds do not require a namespace and retain their build-time behavior. Keep
@@ -87,7 +91,7 @@ are specific to the tested workspace and host.
 python3 -m unittest discover -s build/test/incremental -p 'test_*.py' -v
 ```
 
-All 40 focused regressions passed, including seven legacy/cold-entry cases.
+All 42 focused regressions passed, including eight legacy/cold-entry cases.
 A real CMake/Ninja fixture is built before installing the new entry, moved,
 and rebuilt through the production dispatch hook with missing or rewritten
 ohos_config.json. Both variants compile
