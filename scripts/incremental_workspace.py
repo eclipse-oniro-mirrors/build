@@ -84,7 +84,18 @@ def legacy_source_root(root, build):
     """
     candidates = {}
     suffix = '/third_party/flatbuffers'
-    for cache in build.glob('clang_*/third_party/flatbuffers/CMakeCache.txt'):
+    try:
+        entries = list(build.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        entries = []
+    for directory in entries:
+        # pathlib's directory-only glob can stat every entry before checking
+        # its name, including unrelated src links into an unavailable CI root.
+        if not directory.name.startswith('clang_'):
+            continue
+        cache = directory / 'third_party/flatbuffers/CMakeCache.txt'
+        if not cache.is_file():
+            continue
         fields = dict(re.findall(
             r'^(CMAKE_HOME_DIRECTORY|CMAKE_CACHEFILE_DIR):INTERNAL=(.*)$',
             cache.read_text(errors='replace'), re.M))
@@ -581,7 +592,9 @@ def private_mountpoint(canonical):
     replace_symlink = False
     try:
         replace_symlink = canonical.is_symlink()
-        exists = canonical.is_dir()
+        # A symlink will be replaced privately; its target is irrelevant and
+        # may refer to a previous job on an unavailable filesystem.
+        exists = not replace_symlink and canonical.is_dir()
     except PermissionError:
         exists = False
     if exists and not replace_symlink:

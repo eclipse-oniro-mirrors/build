@@ -67,6 +67,11 @@ inside the consumer's mount namespace; its host files remain unchanged.
 If the original root itself is a symlink to another job, its parent is recreated
 privately and that link is replaced by a directory only in the child namespace.
 The host symlink and its target are not changed or used as consumer output.
+Preparing that replacement does not stat the old link target. Legacy CMake
+discovery checks entry names before probing matching clang_* cache paths, so
+an unrelated out/<product>/src link cannot abort discovery. I/O errors from
+the actual source/output filesystem or a relevant CMake cache still fail
+explicitly; these checks do not turn filesystem failures into successful builds.
 
 Install bubblewrap on Linux before relocating a workspace. Ordinary in-place
 builds do not require a namespace and retain their build-time behavior. Keep
