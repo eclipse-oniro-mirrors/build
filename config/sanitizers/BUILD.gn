@@ -47,7 +47,7 @@ group("deps") {
       data_deps = [ ":copy_asan_runtime" ]
     }
     if (is_mac || !use_xcode_clang) {
-      public_deps = [ ":asan_runtime_bundle_data" ]
+      deps += [ ":asan_runtime_bundle_data" ]
     }
   }
 }
@@ -94,7 +94,7 @@ if ((is_mac || is_win || !use_xcode_clang || is_ohos) && using_sanitizer) {
     bundle_data("asan_runtime_bundle_data") {
       sources = get_target_outputs(":copy_asan_runtime")
       outputs = [ "{{bundle_executable_dir}}/{{source_file_part}}" ]
-      public_deps = [ ":copy_asan_runtime" ]
+      deps = [ ":copy_asan_runtime" ]
     }
   }
 }
