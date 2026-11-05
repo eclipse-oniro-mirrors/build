@@ -88,6 +88,7 @@ ohos_exec_script_config = {
     "//device/board/unionman/unionpi_tiger/hardware/camera/BUILD.gn",
     "//device/soc/hisilicon/hi3516dv300/sdk_liteos/BUILD.gn",
     "//device/soc/st/stm32mp1xx/sdk_liteos/BUILD.gn",
+    "//device/qemu/common/virt_full/camera/vdi_impl/v4l2/BUILD.gn",
     "//drivers/hdf_core/adapter/khdf/liteos_m/hdi_mini.gni",
     "//drivers/hdf_core/adapter/khdf/uniproton/core/BUILD.gn",
     "//drivers/hdf_core/adapter/uhdf2/hdi.gni",
