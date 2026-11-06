@@ -283,7 +283,8 @@ foreach(_platform, target_platform_list) {
 
   system_install_modules = "${current_platform_dir}/system_install_modules.json"
   system_module_info_list = "${current_platform_dir}/system_module_info.json"
-  system_arm64e_modules_info = "${current_platform_dir}/system_arm64e_module_info.json"
+  system_arm64e_modules_info =
+      "${current_platform_dir}/system_arm64e_module_info.json"
   system_modules_list = "${current_platform_dir}/system_modules_list.txt"
   _system_image_zipfile = "${current_platform_dir}/system.zip"
   _host_toolchain = "$host_toolchain"
@@ -292,8 +293,8 @@ foreach(_platform, target_platform_list) {
     script = "//build/ohos/packages/modules_install.py"
     depfile = "$target_gen_dir/$target_name.d"
     deps = [
-      ":${current_platform}_parts_list",
       ":${current_platform}_hisysevent_install_info",
+      ":${current_platform}_parts_list",
       ":${current_platform}_sa_profile_install_info",
       ":generate_host_symlink",
       ":merge_system_notice_file_${current_platform}",
@@ -732,23 +733,23 @@ group("test_example_template") {
   deps = []
   if (device_name == "rk3568") {
     deps += [
-      "//build/test/test_example_template/test_ohos_executable:test_ohos_executable",
-      "//build/test/test_example_template/test_ohos_sa_profile:test_ohos_sa_profile",
-      "//build/test/test_example_template/test_ohos_shared_headers:test_ohos_shared_headers",
-      "//build/test/test_example_template/test_ohos_shared_library:test_ohos_shared_library",
-      "//build/test/test_example_template/test_ohos_shared_library_module_install_dir:test_ohos_shared_library_module_install_dir",
-      "//build/test/test_example_template/test_ohos_shared_library_output_name:test_ohos_shared_library_output_name",
-      "//build/test/test_example_template/test_ohos_shared_library_relative_install_dir:test_ohos_shared_library_relative_install_dir",
-      "//build/test/test_example_template/test_ohos_shared_library_testonly:test_ohos_shared_library_testonly",
-      "//build/test/test_example_template/test_ohos_source_set:test_ohos_source_set",
-      "//build/test/test_example_template/test_ohos_static_library:test_ohos_static_library",
+      "//build/test/test_example_template/test_ohos_executable",
+      "//build/test/test_example_template/test_ohos_sa_profile",
+      "//build/test/test_example_template/test_ohos_shared_headers",
+      "//build/test/test_example_template/test_ohos_shared_library",
+      "//build/test/test_example_template/test_ohos_shared_library_module_install_dir",
+      "//build/test/test_example_template/test_ohos_shared_library_output_name",
+      "//build/test/test_example_template/test_ohos_shared_library_relative_install_dir",
+      "//build/test/test_example_template/test_ohos_shared_library_testonly",
+      "//build/test/test_example_template/test_ohos_source_set",
+      "//build/test/test_example_template/test_ohos_static_library",
     ]
     if (target_cpu == "arm64") {
       deps += [
-        "//build/test/test_example_template/test_ohos_cangjie_shared_library:test_ohos_cangjie_shared_library",
-        "//build/test/test_example_template/test_ohos_cangjie_static_library:test_ohos_cangjie_static_library",
-        "//build/test/test_example_template/test_ohos_cangjie_macro_library:test_ohos_cangjie_macro_library",
-        "//build/test/test_example_template/test_ohos_cangjie_unittest:test_ohos_cangjie_unittest",
+        "//build/test/test_example_template/test_ohos_cangjie_macro_library",
+        "//build/test/test_example_template/test_ohos_cangjie_shared_library",
+        "//build/test/test_example_template/test_ohos_cangjie_static_library",
+        "//build/test/test_example_template/test_ohos_cangjie_unittest",
       ]
     }
   }
@@ -758,26 +759,26 @@ group("test_rust_template") {
   testonly = true
   if (device_name == "rk3568") {
     deps = [
-      "//build/rust/tests/test_bin_cargo_crate:test_bin_cargo_crate",
-      "//build/rust/tests/test_bin_crate:test_bin_crate",
+      "//build/rust/tests/test_bin_cargo_crate",
+      "//build/rust/tests/test_bin_crate",
       "//build/rust/tests/test_bindgen_test/test_for_extern_c:test_extern_c",
       "//build/rust/tests/test_bindgen_test/test_for_h:bindgen_test_for_h",
       "//build/rust/tests/test_bindgen_test/test_for_hello_world:bindgen_test",
       "//build/rust/tests/test_bindgen_test/test_for_hpp:bindgen_test_hpp",
-      "//build/rust/tests/test_cdylib_crate:test_cdylib_crate",
+      "//build/rust/tests/test_cdylib_crate",
       "//build/rust/tests/test_cxx:test_cxx_exe",
-      "//build/rust/tests/test_cxx_rust:test_cxx_rust",
-      "//build/rust/tests/test_dylib_crate:test_dylib_crate",
-      "//build/rust/tests/test_idl:test_idl",
-      "//build/rust/tests/test_proc_macro_cargo_crate:test_proc_macro_cargo_crate",
-      "//build/rust/tests/test_proc_macro_crate/test_attribute_macro:test_attribute_macro",
-      "//build/rust/tests/test_proc_macro_crate/test_derive_helper_macro:test_derive_helper_macro",
-      "//build/rust/tests/test_proc_macro_crate/test_function_macro:test_function_macro",
+      "//build/rust/tests/test_cxx_rust",
+      "//build/rust/tests/test_dylib_crate",
+      "//build/rust/tests/test_idl",
+      "//build/rust/tests/test_proc_macro_cargo_crate",
+      "//build/rust/tests/test_proc_macro_crate/test_attribute_macro",
+      "//build/rust/tests/test_proc_macro_crate/test_derive_helper_macro",
+      "//build/rust/tests/test_proc_macro_crate/test_function_macro",
       "//build/rust/tests/test_rlib_cargo_crate:test_rlib_crate_associated_bin",
-      "//build/rust/tests/test_rlib_crate:test_rlib_crate",
-      "//build/rust/tests/test_rust_ut:test_rust_ut",
-      "//build/rust/tests/test_static_link:test_static_link",
-      "//build/rust/tests/test_staticlib_crate:test_staticlib_crate",
+      "//build/rust/tests/test_rlib_crate",
+      "//build/rust/tests/test_rust_ut",
+      "//build/rust/tests/test_static_link",
+      "//build/rust/tests/test_staticlib_crate",
     ]
   }
 }

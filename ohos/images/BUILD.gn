@@ -315,8 +315,8 @@ foreach(_platform, target_platform_list) {
         # These programs run through PATH rather than Python imports, so the
         # automatic pydeps collection cannot discover them.
         sources += [
-          "${base_dir}/mkcpioimage.py",
           "${base_dir}/judge_updater_image.py",
+          "${base_dir}/mkcpioimage.py",
         ]
       }
       outputs = [ output_image_file ]
