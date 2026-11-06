@@ -56,6 +56,11 @@ class PrebuiltSdk(PrebuiltSdkInterface):
             if sdk_root != default_root or not self._source_sdk_tools().dependencies.is_within(Path(sdk_path).resolve(), sdk_root):
                 return False
             tools = self._source_sdk_tools()
+            if (self._reuse_source_sdk_configuration(args_dict)
+                    and not tools.state_path(CURRENT_OHOS_ROOT, self.api_version).exists()):
+                # An untracked package keeps the original existence-only policy.
+                # A normal build can establish source SDK provenance later.
+                return False
             return tools.needs_build(CURRENT_OHOS_ROOT, self.api_version, self._source_sdk_context(args_dict))
 
         return True
@@ -68,6 +73,12 @@ class PrebuiltSdk(PrebuiltSdkInterface):
             spec.loader.exec_module(module)
             self._source_sdk_module = module
         return self._source_sdk_module
+
+    @staticmethod
+    def _reuse_source_sdk_configuration(args_dict):
+        fast = getattr(args_dict.get('fast_rebuild'), 'arg_value', False)
+        overrides = getattr(args_dict.get('prebuilts_sdk_gn_args'), 'arg_value', [])
+        return fast and not overrides
 
     def _source_sdk_context(self, args_dict):
         values = self._prepare_build_args(args_dict)
@@ -181,6 +192,23 @@ class PrebuiltSdk(PrebuiltSdkInterface):
                     vv = v.strip().strip("'").strip('"')
                     if vv:
                         gn_args_parts.append(vv)
+
+        if self._reuse_source_sdk_configuration(args_dict):
+            tools = self._source_sdk_tools()
+            state = tools.state_path(CURRENT_OHOS_ROOT, self.api_version)
+            if state.exists():
+                previous = tools.dependencies.read_json(state)
+                context = previous.get('context', {})
+                recorded_args = context.get('gn_args') if isinstance(context, dict) else None
+                if (previous.get('schema') != 1 or previous.get('api') != self.api_version
+                        or not isinstance(recorded_args, list) or not recorded_args
+                        or not all(isinstance(value, str) and value.strip() for value in recorded_args)):
+                    raise RuntimeError('Cannot recover source SDK configuration for --fast-rebuild; '
+                                       'rerun without --fast-rebuild and pass the original '
+                                       '--prebuilts-sdk-gn-args')
+                # Use the selected recipe for both validation and a required
+                # rebuild; SDK source changes must not switch its configuration.
+                gn_args_parts = list(recorded_args)
 
         return {
             'ccache_args': 'true' if ccache_enabled else 'false',
