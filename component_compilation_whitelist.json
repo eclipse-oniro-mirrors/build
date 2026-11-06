@@ -1937,25 +1937,25 @@
             "//drivers/hdf_core/interfaces/inner_api/osal/uhdf/",
             "//drivers/hdf_core/interfaces/inner_api/hdi/"
         ],
-        "//drivers/interface/pin_auth/v3_0:libpin_auth_proxy_3.0": [
+        "//drivers/interface/pin_auth/v4_0:libpin_auth_proxy_4.0": [
             "//drivers/hdf_core/adapter/uhdf2/ipc/include/",
             "//drivers/hdf_core/interfaces/inner_api/utils/",
             "//drivers/hdf_core/interfaces/inner_api/osal/uhdf/",
             "//drivers/hdf_core/interfaces/inner_api/hdi/"
         ],
-        "//drivers/interface/pin_auth/v3_0:libpin_auth_stub_3.0": [
+        "//drivers/interface/pin_auth/v4_0:libpin_auth_stub_4.0": [
             "//drivers/hdf_core/adapter/uhdf2/ipc/include/",
             "//drivers/hdf_core/interfaces/inner_api/utils/",
             "//drivers/hdf_core/interfaces/inner_api/osal/uhdf/",
             "//drivers/hdf_core/interfaces/inner_api/hdi/"
         ],
-        "//drivers/interface/pin_auth/v3_0:pin_auth_idl_headers": [
+        "//drivers/interface/pin_auth/v4_0:pin_auth_idl_headers": [
             "//drivers/hdf_core/adapter/uhdf2/ipc/include/",
             "//drivers/hdf_core/interfaces/inner_api/utils/",
             "//drivers/hdf_core/interfaces/inner_api/osal/uhdf/",
             "//drivers/hdf_core/interfaces/inner_api/hdi/"
         ],
-        "//drivers/interface/pin_auth/v3_0:pin_auth_idl_headers_3.0": [
+        "//drivers/interface/pin_auth/v4_0:pin_auth_idl_headers_4.0": [
             "//drivers/hdf_core/adapter/uhdf2/ipc/include/",
             "//drivers/hdf_core/interfaces/inner_api/utils/",
             "//drivers/hdf_core/interfaces/inner_api/osal/uhdf/",
