@@ -26,9 +26,82 @@ import subprocess
 import sys
 import time
 
-MANIFEST = 'out/incremental_workspace.json'
+LEGACY_MANIFEST = 'out/incremental_workspace.json'
+MANIFEST = LEGACY_MANIFEST
 PHYSICAL_ROOT_ENV = 'OHOS_INCREMENTAL_PHYSICAL_ROOT'
 DEPFILE_INPUTS_VERSION = 1
+ACTIVE_POLICY = None
+ACTIVE_ROOT = None
+
+
+def request_build_dir(root, request):
+    if ACTIVE_POLICY is not None:
+        return root / ACTIVE_POLICY['build_dir']
+    return root / 'out' / request.product_name.split('@', 1)[0]
+
+
+def restore_state_path(root):
+    return (root / MANIFEST).with_name('incremental_workspace.restore-state.json')
+
+
+def activate_product_policy(root, arguments=None):
+    global MANIFEST, ACTIVE_POLICY, ACTIVE_ROOT
+    try:
+        from . import incremental_product_policy as policy
+    except ImportError:
+        import incremental_product_policy as policy
+    if arguments is None:
+        inherited = json.loads(os.environ.get(policy.CONTEXT, '{}'))
+        name = inherited.get('product')
+        if not name:
+            raise ValueError('Mapped workspace entry requires a selected enabled product')
+        arguments = ['--product-name', name+'@'+inherited['company']]
+    data = policy.resolve(root, arguments)
+    if not data['enabled']:
+        ACTIVE_POLICY = None
+        ACTIVE_ROOT = None
+        MANIFEST = LEGACY_MANIFEST
+        return False
+    ACTIVE_POLICY = data
+    ACTIVE_ROOT = root
+    MANIFEST = str(Path(data['build_dir'])/'incremental_workspace.json')
+    os.environ[policy.CONTEXT] = json.dumps(data, separators=(',', ':'))
+    os.environ[policy.ENTERED_POLICY] = data['key']
+    return True
+
+
+def read_build_baseline(root):
+    destination = root / MANIFEST
+    if destination.exists():
+        data = json.loads(destination.read_text())
+        if data.get('version') != 1:
+            raise ValueError('Unsupported manifest version')
+        if ACTIVE_POLICY is not None:
+            try:
+                from .incremental_product_policy import baseline_policy
+            except ImportError:
+                from incremental_product_policy import baseline_policy
+            if (data.get('workspace_policy') != baseline_policy(ACTIVE_POLICY)
+                    or data.get('build_dir') != ACTIVE_POLICY['build_dir']):
+                phase('ignoring baseline for another product or workspace policy')
+                return None
+        return data
+    # Only enabled, matching products may import an old global v1 baseline.
+    # Keep the old file intact for rollback and never inspect it when disabled.
+    if ACTIVE_POLICY is not None:
+        legacy = root / 'out/incremental_workspace.json'
+        if legacy.is_file():
+            data = json.loads(legacy.read_text())
+            build = root / ACTIVE_POLICY['build_dir']
+            args = build / 'args.gn'
+            match = re.search(r'^product_name\s*=\s*"([^"\n]+)"', args.read_text(), re.M) if args.is_file() else None
+            if (data.get('version') == 1 and data.get('build_dir') == ACTIVE_POLICY['build_dir']
+                    and match and match[1] == ACTIVE_POLICY['product']
+                    and data.get('graph_identity', {}).get('args') == graph_identity(build).get('args')):
+                phase('importing matching legacy baseline for '+ACTIVE_POLICY['product'])
+                write_manifest(destination, data)
+                return json.loads(destination.read_text())
+    return None
 
 
 def phase(message, started=None):
@@ -57,6 +130,12 @@ def graph_identity(build):
 
 
 def write_manifest(path, data):
+    if ACTIVE_POLICY is not None and path == ACTIVE_ROOT / MANIFEST:
+        try:
+            from .incremental_product_policy import baseline_policy
+        except ImportError:
+            from incremental_product_policy import baseline_policy
+        data = dict(data, workspace_policy=baseline_policy(ACTIVE_POLICY))
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f'.{os.getpid()}.tmp')
     try:
@@ -120,14 +199,10 @@ def legacy_source_root(root, build):
 
 def prepare_build(root, arguments):
     destination = root / MANIFEST
-    data = None
-    if destination.exists():
-        data = json.loads(destination.read_text())
-        if data.get('version') != 1:
-            raise ValueError('Unsupported manifest version')
+    data = read_build_baseline(root)
     request = build_request(arguments)
     if request.product_name:
-        build = root / 'out' / request.product_name.split('@', 1)[0]
+        build = request_build_dir(root, request)
         canonical, evidence = legacy_source_root(root, build)
         cache_evidence = evidence is not None and evidence.endswith('/CMakeCache.txt')
         mismatch = (data is not None and cache_evidence
@@ -179,11 +254,11 @@ def finish_build(root, arguments):
     if (not request.product_name or request.build_only_gn or request.build_only_load
             or request.build_target != ['make_all']):
         return
-    build = root / 'out' / request.product_name.split('@', 1)[0]
+    build = request_build_dir(root, request)
     if not (build / 'build.ninja').is_file():
         return
     destination = root / MANIFEST
-    previous = json.loads(destination.read_text()) if destination.exists() else None
+    previous = read_build_baseline(root)
     identity = graph_identity(build)
     previous_graph = previous.get('graph_identity', {}) if previous else {}
     same_graph = previous_graph == identity
@@ -563,7 +638,7 @@ def acknowledge_successful_baseline(root):
 
 def write_restore_state(root, identity):
     try:
-        write_manifest(root / 'out/incremental_workspace.restore-state.json', identity)
+        write_manifest(restore_state_path(root), identity)
     except OSError as error:
         # The manifest remains valid. A stale/missing cache causes a conservative
         # recheck next time; it must not turn a successful product into failure.
@@ -574,7 +649,7 @@ def restore_transferred_snapshot(root, data, *, tools_validated=False):
     """Restore once per baseline and physical path, preserving later edits."""
     started = time.perf_counter()
     identity = restore_identity(root)
-    state = root / 'out/incremental_workspace.restore-state.json'
+    state = restore_state_path(root)
     try:
         previous = json.loads(state.read_text())
     except (FileNotFoundError, ValueError):
@@ -668,6 +743,7 @@ def enter(root, data, command):
         raise ValueError('canonical_root must be an absolute workspace directory')
     env = os.environ.copy()
     env['OHOS_INCREMENTAL_ENTERED'] = str(canonical)
+    env['OHOS_INCREMENTAL_ENTERED_PID'] = str(os.getpid())
     env['OHOS_INCREMENTAL_BUILD_TIME'] = data.get('build_time', '')
     env['OHOS_INCREMENTAL_BUILD_DATETIME'] = data.get('build_datetime', '')
     # HB rotates ccache.log before building. Distinct physical checkouts must
@@ -727,17 +803,29 @@ def main():
             return code
     elif args.mode in ('prepare', 'finish'):
         arguments = args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments
+        enabled = activate_product_policy(root, arguments)
+        if not enabled:
+            if args.mode == 'prepare':
+                env = {key: value for key, value in os.environ.items()
+                       if not key.startswith('OHOS_INCREMENTAL_')}
+                os.chdir(root)
+                os.execvpe('bash', ['bash', './build.sh', *arguments], env)
+            return 0
         if args.mode == 'prepare':
             prepare_build(root, arguments)
             # No mapping was necessary. Re-enter the original shell once with
             # a guard; do not return to a second copy of the build pipeline.
             env = os.environ.copy()
             env['OHOS_INCREMENTAL_ENTERED'] = str(root)
+            env['OHOS_INCREMENTAL_ENTERED_PID'] = str(os.getpid())
             os.chdir(root)
             os.execvpe('bash', ['bash', './build.sh', *arguments], env)
         else:
             finish_build(root, arguments)
     else:
+        if args.mode == 'enter' and os.environ.get('OHOS_INCREMENTAL_PRODUCT_POLICY'):
+            if not activate_product_policy(root):
+                raise ValueError('Mapped workspace product feature is disabled')
         data = json.loads((root / MANIFEST).read_text())
         if data.get('version') != 1: raise ValueError('Unsupported manifest version')
         if args.mode == 'restore':

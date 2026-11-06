@@ -4,13 +4,15 @@ The supported workflow transfers the complete source workspace together with
 its out/ directory, then runs the existing build command:
 
 ```bash
-./build.sh --product-name wukong100 --build-target make_all --ccache
+./build.sh --product-name x86_64_virt --build-target make_all --ccache \
+  --gn-args runtime_core_enable_codegen=false --deps-guard=false
 ```
 
 ## Automatic baseline and relocation
 
 Before the preloader, loader or GN can rewrite imported build metadata, the
-entry script checks out/incremental_workspace.json. A successful explicit
+entry script first reads the product feature. Only enabled products check their
+actual output folder/incremental_workspace.json (see Product opt-in below). A successful explicit
 make_all records source input digests, nanosecond timestamps, executable bits,
 tool identities, the original logical root and build time. Unchanged builds
 refresh that record without collecting all Ninja inputs again. The trailing
@@ -18,7 +20,7 @@ refresh that record without collecting all Ninja inputs again. The trailing
 builds retain their requested targets and do not replace the full baseline.
 
 Successful full-product seals also atomically acknowledge the exact manifest
-in `out/incremental_workspace.restore-state.json`. The restore key includes the
+in `<actual product output>/incremental_workspace.restore-state.json`. The restore key includes the
 manifest content hash, host boot identity, root device/inode and physical path.
 Normal successful refreshes update this key, so the next build in the same
 physical workspace does not hash all transferred inputs again. A rename, copy,
@@ -133,7 +135,7 @@ single-target build also passed with zero executed steps. These measurements
 are specific to the tested workspace and host.
 
 ```bash
-python3 -m unittest discover -s build/test/incremental -p 'test_*.py' -v
+python3 /path/to/incremental/openharmony/tests/build/run_tests.py --source-root /path/to/oh
 ```
 
 All 42 focused regressions passed, including eight legacy/cold-entry cases.
@@ -145,8 +147,8 @@ and execute changed consumers, check missing outputs and failing permission
 validation, compare actual ramdisk bytes and exercise concurrent copies. The
 original and isolated-config standard-library ABC files were byte-identical.
 Shader payload comparison covered 544 packed shader files with equal bytes;
-87 .meta files contained host path/time differences. No device was connected,
-so device behavior and broader XTS/libc stability suites were not verified.
+87 .meta files contained host path/time differences. These checks cover the
+reported host build and artifact comparisons.
 The build/test/script/start_ex.sh suites remove out/ before running and were
 not executed against this retained workspace.
 
@@ -177,3 +179,55 @@ This series does not include the existing proposals ICU !481, graphic_3d !686,
 libtiff !47, ets_frontend !11396 or build !7182. In particular it does not enable
 global -ffile-prefix-map: that option alone does not relocate CMake caches,
 Ninja dependency databases or absolute tool paths. Those PRs remain separate.
+
+
+## Product opt-in for workspace reuse
+
+`build_framework_enable_incremental_build` is registered in `build/bundle.json`
+and declared in `build/ohos_var.gni` as a boolean defaulting to `false`. Configure
+it in the selected product's `build_framework` component features:
+
+```json
+{
+  "subsystem": "build",
+  "components": [{
+    "component": "build_framework",
+    "features": ["build_framework_enable_incremental_build = true"]
+  }]
+}
+```
+
+Only the x86_64_virt product configuration opts in. This is configuration, not a
+product-name or CPU check in the build framework. Product inheritance and part
+overrides follow HB's shared read-only product enumeration. A conflicting
+`--gn-args` override is rejected; users keep the normal build command.
+
+The feature controls baseline capture/validation, transferred input timestamp
+restoration, path relocation and the build entry's bubblewrap bootstrap. Correct
+Ninja input/output declarations, HAP/SDK recovery and other repository fixes
+remain active independently. OSKM's separate LSP namespace is unaffected.
+
+Disabled builds do not enter the workspace helper or read its manifests, CMake
+root evidence or restore state. Snapshot environment variables are ignored.
+Enabled fresh calls clear stale snapshot values; internal re-entry is bound to
+product/configuration, the physical directory identity and the actual shell PID.
+SDK subprocesses do not own or overwrite the top-level product's baseline.
+
+New baseline and restore state files are stored in the actual product output
+folder (`out/<board>`, host/small-system/custom paths follow HB). They bind the
+selected product, company, configuration path and workspace policy version. An
+old global v1 baseline is imported only when the enabled selected product, build
+folder and recorded GN argument identity match. Disabled products never import
+or delete it. An enabled external output must be inside the transferred tree.
+
+After changing the feature or selected product, first run without
+`--fast-rebuild`. Later normal and fast source increments keep their usual
+semantics; a single target never promotes itself to make_all or captures a new
+complete baseline. Explicit `--product-name` is required for automatic workspace
+reuse; menu/direct HB calls keep their normal build behavior.
+
+Regression tests are maintained in the personal repository, outside this PR:
+https://gitcode.com/ringking0/incremental/tree/main/openharmony/tests/build
+They run only when explicitly invoked by a user or gate, never during product
+compilation. The original test snapshot is retained there before removal from
+the PR's final diff.

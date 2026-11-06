@@ -95,8 +95,10 @@ class BuildArgsResolver(ArgsResolverInterface):
             target_generator.regist_arg('ohos_build_compiler_specified',
                                         ProductUtil.get_compiler(config.device_path))
 
-        snapshot_time = os.environ.get('OHOS_INCREMENTAL_BUILD_TIME')
-        snapshot_datetime = os.environ.get('OHOS_INCREMENTAL_BUILD_DATETIME')
+        from scripts.incremental_product_policy import inherited_snapshot
+        use_snapshot = inherited_snapshot(config.root_path, config.product, config.product_json)
+        snapshot_time = os.environ.get('OHOS_INCREMENTAL_BUILD_TIME') if use_snapshot else None
+        snapshot_datetime = os.environ.get('OHOS_INCREMENTAL_BUILD_DATETIME') if use_snapshot else None
         target_generator.regist_arg('ohos_build_time',
                                     int(snapshot_time) if snapshot_time else
                                     SystemUtil.get_current_time(time_type='timestamp'))

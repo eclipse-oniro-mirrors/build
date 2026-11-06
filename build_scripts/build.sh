@@ -54,10 +54,47 @@ while [[ ! -f "${SOURCE_ROOT_DIR}/.gn" ]]; do
     fi
 done
 
-# Detect relocation before preloader/loader/GN can rewrite the imported graph.
-if [[ "${OHOS_INCREMENTAL_ENTERED:-}" != "${SOURCE_ROOT_DIR}" ]]; then
-  exec python3 "${SOURCE_ROOT_DIR}/build/scripts/incremental_workspace.py" \
-    --root "${SOURCE_ROOT_DIR}" prepare -- "$@"
+# Query the product feature before reading any transferred build state. This
+# phase is read-only; use an existing prebuilt Python, with host Python as a
+# relocation fallback if a transferred absolute tool link is not usable yet.
+incremental_policy_python=""
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64) incremental_policy_platform="linux-x86" ;;
+  Linux:aarch64|Linux:arm64) incremental_policy_platform="linux-arm64" ;;
+  *) incremental_policy_platform="" ;;
+esac
+if [[ -n "$incremental_policy_platform" ]]; then
+  for incremental_candidate in "${SOURCE_ROOT_DIR}/prebuilts/python/${incremental_policy_platform}"/*/bin/python3; do
+    if [[ -x "$incremental_candidate" ]]; then
+      incremental_policy_python="$incremental_candidate"
+    fi
+  done
+fi
+if [[ -z "$incremental_policy_python" ]]; then
+  incremental_policy_python="$(command -v python3 || true)"
+fi
+incremental_workspace_enabled=0
+if [[ -n "$incremental_policy_python" ]]; then
+  incremental_policy_output="$(PYTHONDONTWRITEBYTECODE=1 "$incremental_policy_python" \
+    "${SOURCE_ROOT_DIR}/build/scripts/incremental_product_policy.py" \
+    --root "${SOURCE_ROOT_DIR}" --shell -- "$@")" || exit $?
+  mapfile -t incremental_policy_fields <<< "$incremental_policy_output"
+  incremental_workspace_enabled="${incremental_policy_fields[0]}"
+fi
+if [[ "$incremental_workspace_enabled" == 1 ]]; then
+  export OHOS_INCREMENTAL_PRODUCT_POLICY="${incremental_policy_fields[2]}"
+  if [[ "${OHOS_INCREMENTAL_ENTERED:-}" != "${SOURCE_ROOT_DIR}" || \
+        "${OHOS_INCREMENTAL_ENTERED_POLICY:-}" != "${incremental_policy_fields[1]}" || \
+        "${OHOS_INCREMENTAL_ENTERED_PID:-}" != "$$" ]]; then
+    unset OHOS_INCREMENTAL_BUILD_TIME OHOS_INCREMENTAL_BUILD_DATETIME
+    unset OHOS_INCREMENTAL_PHYSICAL_ROOT OHOS_INCREMENTAL_VERIFIED_RUN
+    exec "$incremental_policy_python" "${SOURCE_ROOT_DIR}/build/scripts/incremental_workspace.py" \
+      --root "${SOURCE_ROOT_DIR}" prepare -- "$@"
+  fi
+else
+  unset OHOS_INCREMENTAL_PRODUCT_POLICY OHOS_INCREMENTAL_ENTERED_POLICY OHOS_INCREMENTAL_ENTERED_PID
+  unset OHOS_INCREMENTAL_ENTERED OHOS_INCREMENTAL_PHYSICAL_ROOT OHOS_INCREMENTAL_VERIFIED_RUN
+  unset OHOS_INCREMENTAL_BUILD_TIME OHOS_INCREMENTAL_BUILD_DATETIME
 fi
 
 incremental_original_args=("$@")
@@ -233,11 +270,13 @@ if [[ "$?" -ne 0 ]]; then
     echo -e "\033[31m=====build ${product_name} error=====\033[0m"
     exit 1
 fi
-python3 "${SOURCE_ROOT_DIR}/build/scripts/incremental_workspace.py" \
-  --root "${SOURCE_ROOT_DIR}" finish -- "${incremental_original_args[@]}"
-if [[ "$?" -ne 0 ]]; then
-  echo "[OHOS ERROR] Build completed but recording the relocatable baseline failed."
-  exit 1
+if [[ "$incremental_workspace_enabled" == 1 ]]; then
+  python3 "${SOURCE_ROOT_DIR}/build/scripts/incremental_workspace.py" \
+    --root "${SOURCE_ROOT_DIR}" finish -- "${incremental_original_args[@]}"
+  if [[ "$?" -ne 0 ]]; then
+    echo "[OHOS ERROR] Build completed but recording the relocatable baseline failed."
+    exit 1
+  fi
 fi
 echo -e "\033[32m=====build ${product_name} successful=====\033[0m"
 
