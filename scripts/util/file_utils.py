@@ -108,9 +108,11 @@ def write_file(output_file, content):
         # Compare the final formatted representation, not the raw template.
         content = subprocess.check_output(
             [gn_exe, 'format', '--stdin'], input=content, text=True)
-    if os.path.isfile(output_file):
-        with open(output_file, 'r') as output_f:
-            if output_f.read() == content:
-                return
+        if os.path.isfile(output_file):
+            with open(output_file, 'r') as output_f:
+                if output_f.read() == content:
+                    return
+    # Other files may acknowledge actions that recreate undeclared outputs.
+    # Preserve their write/mtime semantics so Ninja restat cannot hide that work.
     with open(output_file, 'w') as output_f:
         output_f.write(content)
