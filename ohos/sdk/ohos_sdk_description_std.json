@@ -1361,6 +1361,39 @@
         ]
     },
     {
+        "install_dir": "previewer/common/bin/module/file",
+        "module_label": "//foundation/filemanagement/file_api/interfaces/kits/js:fs",
+        "target_os": [
+            "windows",
+            "darwin"
+        ]
+    },
+    {
+        "install_dir": "previewer/common/bin/module/file",
+        "module_label": "//foundation/filemanagement/file_api/interfaces/kits/js/linux:fs",
+        "target_os": [
+            "linux"
+        ]
+    },
+    {
+        "install_dir": "previewer/common/bin",
+        "module_label": "//foundation/filemanagement/file_api/utils/filemgmt_libn:filemgmt_libn",
+        "target_os": [
+            "windows",
+            "darwin",
+            "linux"
+        ]
+    },
+    {
+        "install_dir": "previewer/common/bin",
+        "module_label": "//foundation/filemanagement/file_api/utils/filemgmt_libhilog:filemgmt_libhilog",
+        "target_os": [
+            "windows",
+            "darwin",
+            "linux"
+        ]
+    },
+    {
         "install_dir": "js/build-tools/binary-tools",
         "module_label": "//developtools/packing_tool:fastjson-2.0.57",
         "target_os": [
@@ -1677,42 +1710,6 @@
         "module_label": "//arkcompiler/ets_runtime/ecmascript/sdk:copy_ark_aot_compiler_library",
         "target_os": [
             "linux"
-        ]
-    },
-    {
-        "install_dir": "previewer/common/bin/module/file",
-        "module_label": "//foundation/filemanagement/file_api/interfaces/kits/js/linux:fs",
-        "target_os": [
-            "linux",
-            "linux_arm64"
-        ]
-    },
-    {
-        "install_dir": "previewer/common/bin/module/file",
-        "module_label": "//foundation/filemanagement/file_api/interfaces/kits/js:fs",
-        "target_os": [
-            "windows",
-            "darwin"
-        ]
-    },
-    {
-        "install_dir": "previewer/common/bin",
-        "module_label": "//foundation/filemanagement/file_api/utils/filemgmt_libn:filemgmt_libn",
-        "target_os": [
-            "windows",
-            "darwin",
-            "linux",
-            "linux_arm64"
-        ]
-    },
-    {
-        "install_dir": "previewer/common/bin",
-        "module_label": "//foundation/filemanagement/file_api/utils/filemgmt_libhilog:filemgmt_libhilog",
-        "target_os": [
-            "windows",
-            "darwin",
-            "linux",
-            "linux_arm64"
         ]
     },
     {
