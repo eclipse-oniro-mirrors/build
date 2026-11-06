@@ -329,6 +329,15 @@ template("idl_gen_interface") {
         sources += invoker.sources_cpp
       }
       sources += sources_proxy
+      if (defined(invoker.branch_protector_ret)) {
+        branch_protector_ret = invoker.branch_protector_ret
+      }
+      if (defined(invoker.branch_protector_frt)) {
+        branch_protector_frt = invoker.branch_protector_frt
+      }
+      if (defined(invoker.stack_protector_ret)) {
+        stack_protector_ret = invoker.stack_protector_ret
+      }
       if (defined(invoker.configs)) {
         configs = invoker.configs
       }
@@ -389,6 +398,15 @@ template("idl_gen_interface") {
         sources += invoker.sources_cpp
       }
       sources += sources_stub
+      if (defined(invoker.branch_protector_ret)) {
+        branch_protector_ret = invoker.branch_protector_ret
+      }
+      if (defined(invoker.branch_protector_frt)) {
+        branch_protector_frt = invoker.branch_protector_frt
+      }
+      if (defined(invoker.stack_protector_ret)) {
+        stack_protector_ret = invoker.stack_protector_ret
+      }
       if (defined(invoker.configs)) {
         configs = invoker.configs
       }
@@ -454,6 +472,15 @@ template("idl_gen_interface") {
         sources += invoker.sources_cpp
       }
       sources += sources_proxy
+      if (defined(invoker.branch_protector_ret)) {
+        branch_protector_ret = invoker.branch_protector_ret
+      }
+      if (defined(invoker.branch_protector_frt)) {
+        branch_protector_frt = invoker.branch_protector_frt
+      }
+      if (defined(invoker.stack_protector_ret)) {
+        stack_protector_ret = invoker.stack_protector_ret
+      }
       if (defined(invoker.configs)) {
         configs = invoker.configs
       }
@@ -523,6 +550,15 @@ template("idl_gen_interface") {
         sources += invoker.sources_cpp
       }
       sources += sources_stub
+      if (defined(invoker.branch_protector_ret)) {
+        branch_protector_ret = invoker.branch_protector_ret
+      }
+      if (defined(invoker.branch_protector_frt)) {
+        branch_protector_frt = invoker.branch_protector_frt
+      }
+      if (defined(invoker.stack_protector_ret)) {
+        stack_protector_ret = invoker.stack_protector_ret
+      }
       if (defined(invoker.configs)) {
         configs = invoker.configs
       }
