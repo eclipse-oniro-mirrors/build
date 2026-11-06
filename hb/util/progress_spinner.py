@@ -22,6 +22,7 @@ import itertools
 from functools import wraps
 from multiprocessing import Process, Event
 
+
 def _spinner_worker(stop_event, message):
     """
     Independent worker function for the spinner process.

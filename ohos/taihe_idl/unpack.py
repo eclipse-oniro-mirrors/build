@@ -24,7 +24,7 @@ import zipfile
 
 def unpack(src, dst):
     os.makedirs(dst, exist_ok=True)
-    
+
     if not os.path.isfile(src):
         raise ValueError(f"Source file {src} does not exist or is not a file")
     

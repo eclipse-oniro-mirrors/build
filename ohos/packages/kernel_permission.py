@@ -117,8 +117,8 @@ class KernelPermission():
             print("module_path:{}".format(module_path))
             target_source = os.path.join(out_path, module_path)
             if os.path.exists(target_source):
-                cmd = [llvm_path, 
-                        "--add-section", 
+                cmd = [llvm_path,
+                        "--add-section",
                         ".kernelpermission=" + kernel_permission_file,
                         target_source
                         ]

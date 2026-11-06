@@ -13,22 +13,22 @@
 # limitations under the License.
 MAX_RETRIES=50
 COMMAND_TO_RUN=("$@")
- 
+
 for i in $(seq 1 $MAX_RETRIES); do
   echo "Taihe attempt $i/$MAX_RETRIES: Executing command..."
   echo "--> ${COMMAND_TO_RUN[@]}"
  
   "${COMMAND_TO_RUN[@]}"
-  
+
   EXIT_CODE=$?
   if [ $EXIT_CODE -eq 0 ]; then
     echo "Taihe build success"
     exit 0
   fi
- 
+
   sleep 0.1
 done
- 
+
 set -e
 echo "Taihe build fail"
 exit 1

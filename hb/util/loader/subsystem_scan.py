@@ -157,6 +157,7 @@ def scan(subsystem_config_file, example_subsystem_file, source_root_dir, enable_
     LogUtil.hb_info('subsytem config scan completed costed is {} s'.format(round(e_time - s_time, 2)))
     return scan_result
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--subsystem-config-file', required=True)

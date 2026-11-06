@@ -110,9 +110,9 @@ class CountingTheTid(object):
         self.tids = []  # store the tid's end time
 
     def counting_the_new_tid(self, storingdataline):
-        for i, tid in enumerate(self.tids):  
-            if tid <= storingdataline.start:  
-                self.tids[i] = storingdataline.end  
+        for i, tid in enumerate(self.tids):
+            if tid <= storingdataline.start:
+                self.tids[i] = storingdataline.end
                 return i  # renew the endtime and return the current tid
 
         # for the end time is newer than all tids so we need a new one
