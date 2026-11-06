@@ -112,6 +112,7 @@ def gen_targets_gn(parts_targets, config_output_dir):
 
     inner_kits_gni_file = os.path.join(config_output_dir,
                                        'inner_kits_list.gni')
+    inner_kits_list = preserve_target_order(inner_kits_list, inner_kits_gni_file)
     if inner_kits_list:
         inner_kits_content = '"{}",'.format('",\n  "'.join(inner_kits_list))
     else:
@@ -124,6 +125,7 @@ def gen_targets_gn(parts_targets, config_output_dir):
 
     system_list_gni_file = os.path.join(config_output_dir,
                                         'system_kits_list.gni')
+    system_kits_list = preserve_target_order(system_kits_list, system_list_gni_file)
     if system_kits_list:
         system_kits_content = '"{}",'.format('",\n  "'.join(system_kits_list))
     else:
@@ -138,6 +140,7 @@ def gen_targets_gn(parts_targets, config_output_dir):
                                        'parts_test_list.gni')
     parts_test_filter_gni_file = os.path.join(config_output_dir,
                                            'parts_test_filter_list.gni')
+    parts_test_list = preserve_target_order(parts_test_list, parts_test_gni_file)
     if parts_test_list:
         test_list_content = '"{}",'.format('",\n  "'.join(parts_test_list))
     else:

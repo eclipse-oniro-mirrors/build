@@ -103,6 +103,35 @@ does not modify or flash device software. External build environments and
 shared services still need to be managed separately. Concurrent builds of
 the very same physical out/ directory are not supported.
 
+## Reusing baseline collection indexes
+
+Successful enabled `make_all` builds retain an internal index at
+`<actual product output>/.incremental/collection.json`. The manifest binds its
+schema, generation and content digest to the selected product. Missing, corrupt
+or incompatible indexes fall back to a complete capture; downloaded tools and
+source-tree intermediates are never removed to construct this index.
+
+The index covers the complete literal Ninja include/subninja graph, dependency
+database, retained depfile inventory, transitive input closure and source
+fingerprints. Unsupported include syntax falls back to Ninja tool queries.
+Directory identities discover added/deleted depfiles. Source reuse checks device,
+inode, size, modification time, change time and mode on the same filesystem
+instance; timestamps alone do not prove unchanged contents. Parsed depfile rules
+are bounded to 64 MiB, with deferred parsing for reachable uncached rules.
+
+An unchanged finish validates that inventory without rebuilding the parsed
+closure. It also checks previously absent input candidates and tool identities,
+and advances the output timestamp ceiling when unchanged sources rebuild a
+missing output. Changed graphs, dependencies or inputs use the indexed collector.
+Across copies or hosts, entry-verified fingerprints are valid only for the same
+build invocation; subsequent changes still require hashing. Journals are removed
+after finishing, and each product uses its actual output directory.
+
+This bookkeeping does not rewrite compiler/linker commands, skip Ninja, fabricate
+outputs or change device payloads. Disabled products do not enter this path.
+Stable existing inner-kit/system-kit/test-target ordering is preserved while
+retaining the current target membership.
+
 ## Correct incremental dependencies
 
 Content-aware writes preserve unchanged JSON, formatted GN metadata and existing

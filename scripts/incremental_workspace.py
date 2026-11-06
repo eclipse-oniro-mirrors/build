@@ -16,6 +16,7 @@ Transfer out/ with nanosecond mtimes, symlinks and both Ninja state files intact
 """
 import argparse
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -25,10 +26,13 @@ import shutil
 import subprocess
 import sys
 import time
+import stat as stat_module
+import uuid
 
 LEGACY_MANIFEST = 'out/incremental_workspace.json'
 MANIFEST = LEGACY_MANIFEST
 PHYSICAL_ROOT_ENV = 'OHOS_INCREMENTAL_PHYSICAL_ROOT'
+VERIFIED_RUN_ENV = 'OHOS_INCREMENTAL_VERIFIED_RUN'
 DEPFILE_INPUTS_VERSION = 1
 ACTIVE_POLICY = None
 ACTIVE_ROOT = None
@@ -248,7 +252,92 @@ def only_optional_probe_executed(build):
                for description in steps)
 
 
+def refresh_unchanged_index(root, build, previous, cache):
+    """Validate an unchanged complete inventory without reparsing its rules.
+
+    Full stat identities are reusable only on the same filesystem instance.
+    New/deleted depfiles, changed subgraphs, missing inputs and changed tools
+    fall back to the indexed collector; source-only and legacy mtimes never
+    establish an unchanged snapshot by themselves.
+    """
+    instance = instance_identity(root)
+    if (not all(cache.get('instance', {}).get(key) == value for key, value in instance.items())
+            or not cache.get('graph') or not cache.get('closure')
+            or previous.get('depfile_inputs_version') != DEPFILE_INPUTS_VERSION):
+        return False
+    identity = graph_identity(build)
+    if previous.get('graph_identity', {}).get('args') != identity.get('args'):
+        return False
+    try:
+        for name, record in previous['files'].items():
+            if file_signature(os.stat(os.path.join(root, name))) != record.get('stat'):
+                return False
+        for name, record in cache['graph'].items():
+            if file_signature(os.stat(os.path.join(build, name))) != record.get('stat'):
+                return False
+        deps = build / '.ninja_deps'
+        if (digest(deps) if deps.is_file() else None) != cache.get('deps_sha256'):
+            return False
+        seen = set()
+        for path in depfile_inventory(build, cache.get('directories'), local=True):
+            name = str(path.relative_to(build))
+            record = cache['depfiles'].get(name)
+            if record is None or file_signature(path.stat()) != record.get('stat'):
+                return False
+            seen.add(name)
+        if seen != cache['depfiles'].keys():
+            return False
+        # Resolve the complete input candidate set as well: a previously absent
+        # optional input or a changed symlink must not evade the source check.
+        paths = set(cache['ninja_inputs']) | set(cache['ninja_deps'])
+        paths.update(cache['closure']['extra_inputs'])
+        depfile = build / 'build.ninja.d'
+        if depfile.is_file():
+            for _, values in depfile_rules(depfile.read_text()):
+                paths.update(values)
+        files = fingerprint_inputs(root, build, paths, previous['files'], local=True)
+        if files != previous['files'] or tool_identities(root) != previous.get('tools'):
+            return False
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    previous = dict(previous)
+    previous['graph_identity'] = identity
+    previous['origin_instance'] = instance
+    args = (build / 'args.gn').read_text()
+    for name, field in (('ohos_build_time', 'build_time'),
+                        ('ohos_build_datetime', 'build_datetime')):
+        match = re.search(r'^' + name + r'\s*=\s*(.*)$', args, re.M)
+        previous[field] = match[1].strip('"') if match else ''
+    # Missing generated outputs can be rebuilt with unchanged source inputs.
+    # Preserve their new ceiling for later timestamp restoration after transfer.
+    ceiling = previous.get('mtime_ceiling_ns', 0)
+    log = build / '.ninja_log'
+    if log.is_file():
+        for line in log.read_text().splitlines():
+            fields = line.split('\t')
+            if len(fields) >= 3 and fields[2].isdigit():
+                ceiling = max(ceiling, int(fields[2]))
+    previous['mtime_ceiling_ns'] = ceiling
+    write_manifest(root / MANIFEST, previous)
+    return True
+
+
 def finish_build(root, arguments):
+    try:
+        _finish_build(root, arguments)
+    finally:
+        request = build_request(arguments)
+        if request.product_name:
+            build = request_build_dir(root, request)
+            journal = verified_inputs_path(build)
+            if journal is not None:
+                try:
+                    journal.unlink(missing_ok=True)
+                except OSError as error:
+                    phase(f'warning: cannot remove entry verification: {error}')
+
+
+def _finish_build(root, arguments):
     started = time.perf_counter()
     request = build_request(arguments)
     if (not request.product_name or request.build_only_gn or request.build_only_load
@@ -259,6 +348,23 @@ def finish_build(root, arguments):
         return
     destination = root / MANIFEST
     previous = read_build_baseline(root)
+    cache = load_collection_cache(root, build, previous)
+    if cache is not None:
+        if refresh_unchanged_index(root, build, previous, cache):
+            acknowledge_successful_baseline(root)
+            phase('successful baseline refreshed (unchanged indexed inputs)', started)
+            return
+        phase('refreshing indexed successful build baseline')
+        capture(root, build, 'make_all', True, automatic=bool(previous.get('automatic')),
+                previous=previous, cache=cache)
+        acknowledge_successful_baseline(root)
+        phase('successful indexed baseline refreshed', started)
+        return
+    if previous and previous.get('collection_generation'):
+        phase('full baseline capture reason=collection-cache-missing-or-invalid')
+        capture(root, build, 'make_all', True, automatic=bool(previous.get('automatic')), previous=previous)
+        acknowledge_successful_baseline(root)
+        return
     identity = graph_identity(build)
     previous_graph = previous.get('graph_identity', {}) if previous else {}
     same_graph = previous_graph == identity
@@ -404,6 +510,8 @@ def audit(root, build, target):
 
 def depfile_words(text):
     """Decode Make depfile words; quotes are filenames, not shell syntax."""
+    if not any(char in text for char in ('\\', '$', '#')):
+        return text.split()
     words, word = [], []
     index = 0
     while index < len(text):
@@ -432,6 +540,14 @@ def depfile_words(text):
 
 def depfile_rules(text):
     for line in text.replace('\\\r\n', ' ').replace('\\\n', ' ').splitlines():
+        separator = line.find(':')
+        drive = (separator > 0 and line[separator - 1].isalpha()
+                 and (separator == 1 or line[separator - 2].isspace())
+                 and line[separator + 1:separator + 2] in ('/', '\\'))
+        if (separator >= 0 and not drive
+                and not any(char in line for char in ('\\', '$', '#'))):
+            yield line[:separator].split(), line[separator + 1:].split()
+            continue
         escaped = False
         for index, char in enumerate(line):
             if escaped:
@@ -451,106 +567,441 @@ def depfile_rules(text):
                 break
 
 
-def collect_retained_depfiles(build, paths, target):
-    """Ninja's inputs/deps tools do not load retained action depfiles."""
-    started = time.perf_counter()
-    phase('collecting retained action depfiles')
-    known = {os.path.abspath(build / path) for path in paths | {target}}
-    records, producers = {}, {}
-    excluded = {'.cache', 'lsp-portable', '.clangd-lsp-work', '.git'}
-    scanned, next_report = 0, time.perf_counter() + 2
-    for directory, directories, files in os.walk(build):
-        scanned += 1
-        directories[:] = [name for name in directories if name not in excluded]
-        for name in files:
-            if not name.endswith('.d'):
-                continue
-            path = Path(directory) / name
-            content = path.read_bytes()
-            for outputs, inputs in depfile_rules(content.decode('utf-8', errors='replace')):
-                if not inputs:
-                    continue  # GCC -MP's empty header rules are not producers.
-                for output in outputs:
-                    producers.setdefault(os.path.abspath(build / output), set()).add(path)
-        if time.perf_counter() >= next_report:
-            phase(f'retained depfile scan directories={scanned} output_keys={len(producers)}', started)
-            next_report = time.perf_counter() + 2
-    pending, loaded = deque(known), set()
+
+# The collection cache is optional acceleration, committed by generation only
+# after a successful complete product build. It never participates in restore.
+COLLECTION_VERSION = 2
+PARSED_DEPFILE_CACHE_BYTES = 64 * 1024 * 1024
+
+
+def local_collection_identity(root):
+    return {**instance_identity(root),
+            'physical_root': os.environ.get(PHYSICAL_ROOT_ENV, str(root))}
+
+
+def file_signature(stat):
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+            stat.st_ctime_ns, stat.st_mode]
+
+
+def stable_bytes(path):
+    before = path.stat()
+    with path.open('rb') as stream:
+        opened = os.fstat(stream.fileno())
+        content = stream.read()
+        finished = os.fstat(stream.fileno())
+    after = path.stat()
+    signature = file_signature(before)
+    if not signature == file_signature(opened) == file_signature(finished) == file_signature(after):
+        raise RuntimeError(f'Input changed while recording baseline: {path}')
+    return content, signature
+
+
+def collection_cache_path(root, build):
+    return build / '.incremental/collection.json'
+
+
+def load_collection_cache(root, build, previous):
+    if not previous or not previous.get('collection_generation'):
+        return None
+    try:
+        content, _ = stable_bytes(collection_cache_path(root, build))
+        if hashlib.sha256(content).hexdigest() != previous.get('collection_sha256'):
+            return None
+        data = json.loads(content)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not all(isinstance(data.get(key), kind) for key, kind in (
+            ('ninja_inputs', list), ('ninja_deps', list), ('depfiles', dict))):
+        return None
+    if (data.get('version') != COLLECTION_VERSION
+            or data.get('generation') != previous.get('collection_generation')
+            or data.get('canonical_root') != str(root)
+            or data.get('build_dir') != str(build.relative_to(root))
+            or data.get('target') != 'make_all' or previous.get('target') != 'make_all'):
+        return None
+    if data.get('ninja_sha256') != digest(Path(ninja_command(root, build)[0])):
+        return None
+    return data
+
+
+def resolve_cached_string(path, cache):
+    """Resolve each ancestor once, keeping pathlib's handling of real symlinks."""
+    value = os.path.abspath(path)
+    parent, pending = value, []
+    while parent not in cache:
+        head, tail = os.path.split(parent)
+        if head == parent:
+            cache[parent] = os.path.realpath(parent)
+            break
+        pending.append((parent, tail))
+        parent = head
+    resolved = cache[parent]
     while pending:
-        for path in producers.get(pending.popleft(), ()):
-            if path in loaded:
-                continue
-            loaded.add(path)
-            content = path.read_bytes()
-            for _, inputs in depfile_rules(content.decode('utf-8', errors='replace')):
-                paths.update(inputs)
-                for value in inputs:
-                    absolute = os.path.abspath(build / value)
-                    if absolute not in known:
-                        known.add(absolute)
-                        pending.append(absolute)
-            stat = path.stat()
-            records[str(path.relative_to(build))] = [stat.st_size, stat.st_mtime_ns,
-                                                     hashlib.sha256(content).hexdigest()]
-    phase(f'retained depfiles collected files={len(records)}', started)
+        lexical, name = pending.pop()
+        resolved = os.path.join(resolved, name)
+        try:
+            if stat_module.S_ISLNK(os.lstat(resolved).st_mode):
+                resolved = str(Path(resolved).resolve())
+        except OSError:
+            pass  # realpath(strict=False) also leaves unavailable prefixes unresolved.
+        cache[lexical] = resolved
+    return cache[value]
+
+
+def resolve_cached(path, cache):
+    return Path(resolve_cached_string(path, cache))
+
+
+def graph_content_records(root, build, previous, local):
+    """Walk static Ninja include/subninja closure; unsupported syntax disables reuse.
+
+    GN emits literal includes. Arbitrary Ninja variable expansion is deliberately
+    not approximated: Ninja itself will rediscover inputs on that fallback path.
+    """
+    records, pending = {}, [build / 'build.ninja']
+    resolutions = {}
+    resolved_root = resolve_cached(root, resolutions)
+    progress = time.perf_counter() + 2
+    old = previous or {}
+    include = re.compile(rb'(?m)^(?:include|subninja)[ \t]+([^\r\n]+)')
+    while pending:
+        path = pending.pop()
+        relative = os.path.relpath(path, build)
+        if relative in records:
+            continue
+        if not resolve_cached(path, resolutions).is_relative_to(resolved_root):
+            return None
+        signature = file_signature(path.stat())
+        cached = old.get(relative)
+        if local and cached and cached.get('stat') == signature:
+            record = cached
+        else:
+            content, signature = stable_bytes(path)
+            children = []
+            for match in include.finditer(content):
+                value = match[1].decode().strip()
+                # Full expansion/continuation belongs to Ninja. Unsupported
+                # constructs cause conservative tool queries, never a guessed graph.
+                literal_check = re.sub(r'\$([$ :])', '', value)
+                if '$' in literal_check or '#' in value:
+                    return None
+                value = re.sub(r'\$([$ :])', lambda match: match[1], value)
+                children.append(value)
+            record = {'sha256': hashlib.sha256(content).hexdigest(),
+                      'stat': signature, 'includes': children}
+        records[relative] = record
+        pending.extend(Path(os.path.abspath(build / value)) for value in record['includes'])
+        if time.perf_counter() >= progress:
+            phase(f'complete Ninja graph progress files={len(records)}')
+            progress = time.perf_counter() + 2
     return records
 
 
-def capture(root, build, target, allow_dirty, manifest=None, automatic=False):
+def same_graph_content(old, new):
+    return (old is not None and new is not None and old.keys() == new.keys()
+            and all(old[name]['sha256'] == record['sha256'] for name, record in new.items()))
+
+
+def collect_ninja_paths(root, build, tool, target='make_all'):
     started = time.perf_counter()
-    print('incremental workspace: recording successful build baseline', flush=True)
-    phase('auditing Ninja baseline')
-    audit_started = time.perf_counter()
-    code, count, output = audit(root, build, target)
-    phase(f'Ninja audit complete planned={count}', audit_started)
-    if code or (count and not allow_dirty):
-        raise RuntimeError(f'Cannot seal a clean baseline: exit={code}, planned={count}.\n' + output[-4000:])
+    phase(f'collecting Ninja {tool}')
     paths = set()
-    for tool in ('inputs', 'deps'):
-        collect_started = time.perf_counter()
-        print(f'incremental workspace: collecting Ninja {tool}', flush=True)
-        p = subprocess.Popen(ninja_command(root, build, '-t', tool, *(['-E', target] if tool == 'inputs' else [])),
-                             text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        next_report = time.perf_counter() + 2
-        for lines, line in enumerate(p.stdout, 1):
+    command = ninja_command(root, build, '-n', '-t', tool,
+                            *(['-E', target] if tool == 'inputs' else []))
+    with subprocess.Popen(command, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL) as process:
+        for line in process.stdout:
             if tool != 'deps' or line.startswith('    '):
                 paths.add(line.strip())
-            if lines % 1024 == 0 and time.perf_counter() >= next_report:
-                phase(f'collecting Ninja {tool} lines={lines} unique_paths={len(paths)}', collect_started)
-                next_report = time.perf_counter() + 2
-        if p.wait():
+        if process.wait():
             raise RuntimeError(f'ninja -t {tool} failed')
-        phase(f'Ninja {tool} collected unique_paths={len(paths)}', collect_started)
+    phase(f'Ninja {tool} collected unique_paths={len(paths)}', started)
+    return paths
+
+
+def fingerprint_inputs(root, build, paths, previous=None, local=False):
+    """Normalize parents once, deduplicate aliases, and hash only changed objects."""
+    started = time.perf_counter()
+    old = previous or {}
+    candidates, resolutions = {}, {}
+    build_base, root_base = os.path.abspath(build), os.path.abspath(root)
+    prefix = root_base.rstrip(os.sep) + os.sep
+    for value in sorted(paths):
+        lexical = os.path.abspath(os.path.join(build_base, value))
+        parent, name = os.path.split(lexical)
+        path = os.path.join(resolve_cached_string(parent, resolutions), name)
+        try:
+            current = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            if not (path == root_base or path.startswith(prefix)):
+                continue
+            raise
+        if stat_module.S_ISLNK(current.st_mode):
+            path = str(Path(path).resolve())
+            current = None
+        if path == root_base:
+            relative = '.'
+        elif path.startswith(prefix):
+            relative = path[len(prefix):]
+        else:
+            continue
+        if relative == 'out' or relative.startswith('out' + os.sep):
+            continue
+        if current is None:
+            try:
+                current = os.stat(path)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+        candidates[relative] = (path, current)
+    workers = int(os.environ.get('OHOS_INCREMENTAL_JOBS', '4'))
+    if not 1 <= workers <= 8:
+        raise ValueError('OHOS_INCREMENTAL_JOBS must be between 1 and 8')
+    reused = 0
+    files = {}
+
+    def record_input(item):
+        name, path = item
+        try:
+            before = path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            return name, None, False
+        if not (stat_module.S_ISREG(before.st_mode) or stat_module.S_ISDIR(before.st_mode)):
+            return name, None, False
+        signature = file_signature(before)
+        cached = old.get(name)
+        if local and cached and cached.get('stat') == signature:
+            return name, cached, True
+        is_directory = stat_module.S_ISDIR(before.st_mode)
+        fingerprint = directory_digest(path) if is_directory else digest(path)
+        if file_signature(path.stat()) != signature:
+            raise RuntimeError(f'Input changed while fingerprinting: {name}')
+        return name, {'sha256': fingerprint, 'kind': 'directory' if is_directory else 'file',
+                      'mtime_ns': before.st_mtime_ns, 'executable': bool(before.st_mode & 0o111),
+                      'stat': signature}, False
+
+    # Batches bound pending futures and memory; deterministic merge order also
+    # keeps aliases from depending on thread completion order.
+    items = []
+    for name, (path, current) in sorted(candidates.items()):
+        cached = old.get(name)
+        if local and cached and cached.get('stat') == file_signature(current):
+            files[name] = cached
+            reused += 1
+        else:
+            items.append((name, Path(path)))
+    next_progress = time.perf_counter() + 2
+    if items:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for offset in range(0, len(items), 256):
+                for name, record, cached in pool.map(record_input, items[offset:offset + 256]):
+                    if record is not None:
+                        files[name] = record
+                        reused += cached
+                if time.perf_counter() >= next_progress:
+                    phase(f'input fingerprint progress inputs={len(files)} reused={reused}', started)
+                    next_progress = time.perf_counter() + 2
+    files = dict(sorted(files.items()))
+    phase(f'input fingerprints complete inputs={len(files)} reused={reused} workers={workers}', started)
+    return files
+
+
+def depfile_inventory(build, previous=None, local=False, directory_index=None):
+    """Rescan changed directories; stat checks preserve discovery of added files."""
+    excluded = {'.cache', 'lsp-portable', '.clangd-lsp-work', '.git', '.incremental'}
+    old = previous or {}
+    pending, scanned, reused = [('.', build)], 0, 0
+    next_progress = time.perf_counter() + 2
+    while pending:
+        name, path = pending.pop()
+        before = path.stat() if name == '.' else path.lstat()
+        if name != '.' and stat_module.S_ISLNK(before.st_mode):
+            continue
+        signature = file_signature(before) + [before.st_nlink]
+        cached = old.get(name)
+        if local and cached and cached.get('timestamp_stable') and cached['stat'] == signature:
+            record = cached
+            reused += 1
+        else:
+            children, files = [], []
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if entry.name in excluded:
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        children.append(entry.name)
+                    elif entry.name.endswith('.d') and entry.is_file():
+                        files.append(entry.name)
+            after = path.stat() if name == '.' else path.lstat()
+            if file_signature(after) + [after.st_nlink] != signature:
+                raise RuntimeError(f'Output directory changed while collecting depfiles: {path}')
+            stable = max(before.st_mtime_ns, before.st_ctime_ns) < time.time_ns() - 2_000_000_000
+            record = {'stat': signature, 'children': sorted(children), 'depfiles': sorted(files),
+                      'timestamp_stable': stable}
+        scanned += 1
+        if directory_index is not None:
+            directory_index[name] = record
+        for filename in record['depfiles']:
+            yield path / filename
+        pending.extend((str(Path(name) / child), path / child) for child in record['children'])
+        if time.perf_counter() >= next_progress:
+            phase(f'depfile directory progress checked={scanned} reused={reused}')
+            next_progress = time.perf_counter() + 2
+    phase(f'depfile directories checked={scanned} reused={reused}')
+
+
+def collect_retained_depfiles(build, paths, target, *, previous=None, local=False, index=None,
+                              directories=None, directory_index=None, closure=None, closure_result=None):
+    """Discover changed inventories and reuse a bounded set of parsed rules."""
+    started = time.perf_counter()
+    phase('collecting retained action depfiles')
+    build_base = os.path.abspath(build)
+    absolute_paths = {}
+    def absolute(value):
+        if value not in absolute_paths:
+            absolute_paths[value] = os.path.normpath(os.path.join(build_base, value))
+        return absolute_paths[value]
+    initial_paths = paths.copy()
+    base_digest = hashlib.sha256('\0'.join(sorted(paths | {target})).encode()).hexdigest()
+    known = {absolute(path) for path in paths | {target}}
+    records, producers, parsed = {}, {}, {}
+    old = previous or {}
+    reused, retained_bytes, deferred = 0, 0, 0
+    budget = PARSED_DEPFILE_CACHE_BYTES
+    def rule_bytes(rules):
+        return (sys.getsizeof(rules) + sum(sys.getsizeof(rule) +
+                sum(sys.getsizeof(words) + sum(sys.getsizeof(word) for word in words)
+                    for words in rule) for rule in rules))
+    for path in depfile_inventory(build, directories, local, directory_index):
+        relative = str(path.relative_to(build))
+        signature = file_signature(path.stat())
+        cached = old.get(relative)
+        if local and cached and cached.get('stat') == signature:
+            record = cached.copy()
+            reused += 1
+        else:
+            content, signature = stable_bytes(path)
+            fingerprint = hashlib.sha256(content).hexdigest()
+            if cached and cached.get('sha256') == fingerprint:
+                record = {**cached, 'stat': signature}
+            else:
+                rules = list(depfile_rules(content.decode('utf-8', errors='replace')))
+                outputs = [output for rule_outputs, inputs in rules if inputs for output in rule_outputs]
+                record = {'stat': signature, 'sha256': fingerprint,
+                          'rules': rules, 'outputs': outputs}
+        rules = record['rules']
+        if rules is not None:
+            size = rule_bytes(rules)
+            if retained_bytes + size > budget:
+                record['rules'] = None
+            else:
+                retained_bytes += size
+        parsed[relative] = record
+        for output in record['outputs']:
+            producers.setdefault(absolute(output), set()).add(relative)
+    phase(f'retained depfile inventory files={len(parsed)} reused={reused} parsed_cache_bytes={retained_bytes}', started)
+    same_inventory = (closure is not None and closure.get('base') == base_digest
+                      and parsed.keys() == old.keys()
+                      and all(old[name]['sha256'] == record['sha256'] for name, record in parsed.items()))
+    if same_inventory:
+        paths.update(closure['extra_inputs'])
+        for name in closure['retained']:
+            record = parsed[name]
+            signature = record['stat']
+            records[name] = [signature[2], signature[3], record['sha256']]
+        phase(f'retained closure reused files={len(records)}')
+    else:
+        pending, loaded = deque(known), set()
+        while pending:
+            for relative in producers.get(pending.popleft(), ()):
+                if relative in loaded:
+                    continue
+                loaded.add(relative)
+                record = parsed[relative]
+                rules = record['rules']
+                if rules is None:
+                    content, signature = stable_bytes(build / relative)
+                    if signature != record['stat'] or hashlib.sha256(content).hexdigest() != record['sha256']:
+                        raise RuntimeError(f'Depfile changed while collecting baseline: {relative}')
+                    rules = list(depfile_rules(content.decode('utf-8', errors='replace')))
+                    deferred += 1
+                for _, inputs in rules:
+                    new_inputs = set(inputs).difference(paths)
+                    paths.update(inputs)
+                    for value in new_inputs:
+                        resolved = absolute(value)
+                        if resolved not in known:
+                            known.add(resolved)
+                            pending.append(resolved)
+                signature = record['stat']
+                records[relative] = [signature[2], signature[3], record['sha256']]
+    for name, record in parsed.items():
+        if file_signature((build / name).stat()) != record['stat']:
+            raise RuntimeError(f'Depfile changed while collecting baseline: {name}')
+    if closure_result is not None:
+        closure_result.update({'base': base_digest, 'extra_inputs': sorted(paths - initial_paths),
+                               'retained': sorted(records)})
+    if index is not None:
+        index.update(parsed)
+    phase(f'retained depfiles collected files={len(records)} deferred_parses={deferred}', started)
+    return records
+
+
+def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *, previous=None, cache=None):
+    started = time.perf_counter()
+    print('incremental workspace: recording successful build baseline', flush=True)
+    instance = instance_identity(root)
+    # Renaming the same root does not invalidate inode/stat identities. A real
+    # copy, host change or independent checkout still has a different identity.
+    local = bool(cache and all(cache.get('instance', {}).get(key) == value
+                               for key, value in instance.items()))
+    graph_started = time.perf_counter()
+    graph = graph_content_records(root, build, cache.get('graph') if cache else None, local)
+    same_graph = bool(cache and same_graph_content(cache.get('graph'), graph))
+    deps_path = build / '.ninja_deps'
+    deps_digest = digest(deps_path) if deps_path.is_file() else None
+    same_deps = bool(cache and cache.get('deps_sha256') == deps_digest)
+    phase(f'complete Ninja graph checked files={len(graph or {})} same_content={same_graph}', graph_started)
+    if cache and allow_dirty:
+        count = previous.get('baseline_planned') if previous else None
+        phase('Ninja audit skipped: successful make_all; previous diagnostic count retained')
+    else:
+        phase('auditing Ninja baseline')
+        audit_started = time.perf_counter()
+        code, count, output = audit(root, build, target)
+        phase(f'Ninja audit complete planned={count}', audit_started)
+        if code or (count and not allow_dirty):
+            raise RuntimeError(f'Cannot seal a clean baseline: exit={code}, planned={count}.\n' + output[-4000:])
+    inputs = set(cache['ninja_inputs']) if same_graph else collect_ninja_paths(root, build, 'inputs', target)
+    deps = set(cache['ninja_deps']) if same_graph and same_deps else collect_ninja_paths(root, build, 'deps', target)
+    phase(f'Ninja inventory reused inputs={same_graph} deps={same_graph and same_deps}')
+    paths = inputs | deps
     depfile = build / 'build.ninja.d'
     if depfile.exists():
-        for _, inputs in depfile_rules(depfile.read_text()):
-            paths.update(inputs)
-    retained = collect_retained_depfiles(build, paths, target)
-    files = {}
-    fingerprint_started = time.perf_counter()
-    next_report = fingerprint_started + 2
-    next_progress = 50000
-    for value in sorted(paths):
-        path = Path(os.path.abspath(build / value)).resolve()
-        try:
-            relative = path.relative_to(root)
-        except ValueError:
-            continue  # External environment must be pinned separately, not retimestamped.
-        if (relative.parts and relative.parts[0] == 'out') or path.is_symlink():
-            continue
-        if not path.is_file() and not path.is_dir():
-            continue
-        stat = path.stat()
-        kind = 'directory' if path.is_dir() else 'file'
-        files[str(relative)] = {'sha256': directory_digest(path) if kind == 'directory' else digest(path),
-                                'kind': kind, 'mtime_ns': stat.st_mtime_ns,
-                                'executable': bool(stat.st_mode & 0o111)}
-        now = time.perf_counter()
-        if len(files) >= next_progress or now >= next_report:
-            print(f'incremental workspace: fingerprinted {len(files)} source inputs', flush=True)
-            next_progress = (len(files) // 50000 + 1) * 50000
-            next_report = now + 2
-    phase(f'input fingerprints complete inputs={len(files)}', fingerprint_started)
+        for _, values in depfile_rules(depfile.read_text()):
+            paths.update(values)
+    dep_index, directory_index, closure_index = {}, {}, {}
+    retained = collect_retained_depfiles(build, paths, target,
+                                        previous=cache.get('depfiles') if cache else None,
+                                        local=local, index=dep_index,
+                                        directories=cache.get('directories') if cache else None,
+                                        directory_index=directory_index,
+                                        closure=cache.get('closure') if cache else None,
+                                        closure_result=closure_index)
+    fingerprints = previous.get('files', {}) if previous else {}
+    verified = load_verified_inputs(root, build)
+    if verified:
+        # These records were hashed by this build's relocation entry, on this
+        # physical instance. Every candidate still checks its current full stat.
+        fingerprints = {**fingerprints, **verified} if local else verified
+        phase(f'reusing entry-verified fingerprints candidates={len(verified)}')
+    files = fingerprint_inputs(root, build, paths, fingerprints, local or bool(verified))
+    if previous and files == previous.get('files'):
+        phase('successful baseline refreshed (unchanged inputs)')
     args = (build / 'args.gn').read_text() if (build / 'args.gn').exists() else ''
     def value(name):
         match = re.search(r'^' + name + r'\s*=\s*(.*)$', args, re.M)
@@ -574,6 +1025,34 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False):
             'automatic': automatic, 'origin_instance': instance_identity(root),
             'graph_identity': graph_identity(build),
             'depfile_inputs_version': DEPFILE_INPUTS_VERSION, 'retained_depfiles': retained}
+    generation = uuid.uuid4().hex
+    collection = {'version': COLLECTION_VERSION, 'generation': generation,
+                  'canonical_root': str(root), 'build_dir': str(build.relative_to(root)),
+                  'target': target, 'instance': local_collection_identity(root), 'graph': graph,
+                  'ninja_sha256': digest(Path(ninja_command(root, build)[0])),
+                  'deps_sha256': deps_digest, 'ninja_inputs': sorted(inputs),
+                  'ninja_deps': sorted(deps), 'depfiles': dep_index,
+                  'directories': directory_index, 'closure': closure_index}
+    cache_started = time.perf_counter()
+    unchanged_index = (local and same_graph and same_deps
+                       and cache.get('directories', {}).keys() == directory_index.keys()
+                       and all(not entry.get('timestamp_stable')
+                               or cache['directories'][name].get('timestamp_stable')
+                               for name, entry in directory_index.items())
+                       and cache.get('closure') == closure_index
+                       and cache['depfiles'].keys() == dep_index.keys()
+                       and all(cache['depfiles'][name]['sha256'] == entry['sha256']
+                               for name, entry in dep_index.items()))
+    if unchanged_index:
+        generation = cache['generation']
+        phase('collection index reused (unchanged dependency content)')
+    else:
+        write_manifest(collection_cache_path(root, build), collection)
+    data['collection_generation'] = generation
+    data['collection_sha256'] = (previous['collection_sha256'] if unchanged_index
+                                 else digest(collection_cache_path(root, build)))
+    data['baseline_planned_reused'] = bool(cache and allow_dirty)
+    phase('collection index ready', cache_started)
     destination = root / (manifest or MANIFEST)
     save_started = time.perf_counter()
     phase('writing baseline manifest')
@@ -583,7 +1062,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False):
     phase('baseline capture complete', started)
 
 
-def restore(root, data, *, tools_validated=False):
+def restore(root, data, *, tools_validated=False, verified=None):
     canonical = Path(data['canonical_root']) if 'canonical_root' in data else root
     if root != canonical:
         enter(root, data, ['python3', 'build/scripts/incremental_workspace.py',
@@ -604,19 +1083,29 @@ def restore(root, data, *, tools_validated=False):
         is_directory = record.get('kind') == 'directory'
         if not path.exists():
             counts['missing'] += 1
-        elif ((path.is_dir() != is_directory) or
-              (directory_digest(path) if is_directory else digest(path)) != record['sha256'] or
-              bool(path.stat().st_mode & 0o111) != record.get('executable', bool(path.stat().st_mode & 0o111))):
-            if data.get('mtime_ceiling_ns', 0) >= time.time_ns():
-                raise RuntimeError('Snapshot outputs are newer than the host clock; synchronize clocks before restoring changed inputs')
-            counts['changed'] += 1
-            # A changed file with an old preserved mtime still must rebuild.
-            os.utime(path, None)
         else:
-            st = path.stat()
-            if st.st_mtime_ns != record['mtime_ns']:
-                os.utime(path, ns=(st.st_atime_ns, record['mtime_ns']))
+            before = path.stat()
+            actual_directory = stat_module.S_ISDIR(before.st_mode)
+            fingerprint = directory_digest(path) if actual_directory else digest(path)
+            after_hash = path.stat()
+            stable = file_signature(before) == file_signature(after_hash)
+            executable = bool(after_hash.st_mode & 0o111)
+            if (actual_directory != is_directory or fingerprint != record['sha256']
+                    or executable != record.get('executable', executable)):
+                if data.get('mtime_ceiling_ns', 0) >= time.time_ns():
+                    raise RuntimeError('Snapshot outputs are newer than the host clock; synchronize clocks before restoring changed inputs')
+                counts['changed'] += 1
+                # A changed file with an old preserved mtime still must rebuild.
+                os.utime(path, None)
+            elif after_hash.st_mtime_ns != record['mtime_ns']:
+                os.utime(path, ns=(after_hash.st_atime_ns, record['mtime_ns']))
                 counts['restored'] += 1
+            current = path.stat()
+            if verified is not None and stable and (before.st_dev, before.st_ino, before.st_size, before.st_mode) == (
+                    current.st_dev, current.st_ino, current.st_size, current.st_mode):
+                verified[name] = {'sha256': fingerprint, 'kind': 'directory' if actual_directory else 'file',
+                                  'mtime_ns': current.st_mtime_ns, 'executable': bool(current.st_mode & 0o111),
+                                  'stat': file_signature(current)}
         now = time.perf_counter()
         if now >= next_report:
             phase(f'input restore progress={processed}/{total}', started)
@@ -628,6 +1117,31 @@ def restore(root, data, *, tools_validated=False):
 def restore_identity(root):
     return {'manifest_sha256': digest(root / MANIFEST), **instance_identity(root),
             'physical_root': os.environ.get(PHYSICAL_ROOT_ENV, str(root))}
+
+
+def verified_inputs_path(build):
+    token = os.environ.get(VERIFIED_RUN_ENV, '')
+    if not re.fullmatch('[0-9a-f]{32}', token):
+        return None
+    return build / '.incremental' / ('verified-inputs.' + token + '.state')
+
+
+def load_verified_inputs(root, build):
+    path = verified_inputs_path(build)
+    if path is None:
+        return None
+    try:
+        expected, separator, content = path.read_bytes().partition(b'\n')
+        if not separator or hashlib.sha256(content).hexdigest().encode() != expected:
+            return None
+        data = json.loads(content)
+        if (isinstance(data, dict) and data.get('version') == 1 and data.get('identity') == restore_identity(root)
+                and data.get('run') == os.environ[VERIFIED_RUN_ENV]
+                and isinstance(data.get('files'), dict)):
+            return data['files']
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def acknowledge_successful_baseline(root):
@@ -657,7 +1171,26 @@ def restore_transferred_snapshot(root, data, *, tools_validated=False):
     if previous != identity:
         reason = 'state-missing-or-invalid' if previous is None else 'baseline-or-instance-changed'
         phase(f'input restore required reason={reason}')
-        restore(root, data, tools_validated=tools_validated)
+        build_relative = data.get('build_dir')
+        journal = verified_inputs_path(root / build_relative) if build_relative else None
+        verified = {} if journal is not None else None
+        if verified is None:
+            restore(root, data, tools_validated=tools_validated)
+        else:
+            restore(root, data, tools_validated=tools_validated, verified=verified)
+            started_write = time.perf_counter()
+            temporary = journal.with_name(journal.name + f'.{os.getpid()}.tmp')
+            try:
+                journal.parent.mkdir(parents=True, exist_ok=True)
+                content = json.dumps({'version': 1, 'run': os.environ[VERIFIED_RUN_ENV],
+                                      'identity': identity, 'files': verified}, separators=(',', ':')).encode()
+                temporary.write_bytes(hashlib.sha256(content).hexdigest().encode() + b'\n' + content)
+                os.replace(temporary, journal)
+                phase(f'entry verification saved inputs={len(verified)}', started_write)
+            except OSError as error:
+                phase(f'warning: cannot save entry verification; finish will hash normally: {error}')
+            finally:
+                temporary.unlink(missing_ok=True)
         write_restore_state(root, identity)
     else:
         phase('input restore skipped reason=baseline-and-instance-match', started)
@@ -812,6 +1345,15 @@ def main():
                 os.execvpe('bash', ['bash', './build.sh', *arguments], env)
             return 0
         if args.mode == 'prepare':
+            os.environ[VERIFIED_RUN_ENV] = uuid.uuid4().hex
+            request = build_request(arguments)
+            if request.product_name:
+                cache = request_build_dir(root, request) / '.incremental'
+                for journal in cache.glob('verified-inputs.*.state'):
+                    try:
+                        journal.unlink(missing_ok=True)
+                    except OSError as error:
+                        phase(f'warning: cannot remove previous entry verification: {error}')
             prepare_build(root, arguments)
             # No mapping was necessary. Re-enter the original shell once with
             # a guard; do not return to a second copy of the build pipeline.
