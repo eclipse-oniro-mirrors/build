@@ -16,7 +16,10 @@ Transfer out/ with nanosecond mtimes, symlinks and both Ninja state files intact
 """
 import argparse
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from functools import partial
+import multiprocessing
+import threading
 import hashlib
 import json
 import os
@@ -36,6 +39,7 @@ VERIFIED_RUN_ENV = 'OHOS_INCREMENTAL_VERIFIED_RUN'
 DEPFILE_INPUTS_VERSION = 1
 ACTIVE_POLICY = None
 ACTIVE_ROOT = None
+FINGERPRINT_BATCH_SIZE = 128
 
 
 def request_build_dir(root, request):
@@ -143,7 +147,7 @@ def write_manifest(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f'.{os.getpid()}.tmp')
     try:
-        temporary.write_text(json.dumps(data, indent=2) + '\n')
+        temporary.write_text(json.dumps(data, separators=(',', ':')) + '\n')
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -722,14 +726,39 @@ def collect_ninja_paths(root, build, tool, target='make_all'):
     return paths
 
 
-def fingerprint_inputs(root, build, paths, previous=None, local=False):
-    """Normalize parents once, deduplicate aliases, and hash only changed objects."""
-    started = time.perf_counter()
-    old = previous or {}
+def capture_worker_count():
+    available = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
+    workers = int(os.environ.get('OHOS_INCREMENTAL_JOBS', str(min(8, available))))
+    if not 1 <= workers <= 32:
+        raise ValueError('OHOS_INCREMENTAL_JOBS must be between 1 and 32')
+    return workers
+
+
+def fingerprint_record(item):
+    name, path, cached = item
+    try:
+        before = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return name, None, False
+    if not (stat_module.S_ISREG(before.st_mode) or stat_module.S_ISDIR(before.st_mode)):
+        return name, None, False
+    signature = file_signature(before)
+    if cached and cached.get('stat') == signature:
+        return name, cached, True
+    is_directory = stat_module.S_ISDIR(before.st_mode)
+    fingerprint = directory_digest(path) if is_directory else digest(path)
+    if file_signature(path.stat()) != signature:
+        raise RuntimeError(f'Input changed while fingerprinting: {name}')
+    return name, {'sha256': fingerprint, 'kind': 'directory' if is_directory else 'file',
+                  'mtime_ns': before.st_mtime_ns, 'executable': bool(before.st_mode & 0o111),
+                  'stat': signature}, False
+
+
+def normalize_input_paths(context):
+    root_base, build_base, values = context
     candidates, resolutions = {}, {}
-    build_base, root_base = os.path.abspath(build), os.path.abspath(root)
     prefix = root_base.rstrip(os.sep) + os.sep
-    for value in sorted(paths):
+    for value in values:
         lexical = os.path.abspath(os.path.join(build_base, value))
         parent, name = os.path.split(lexical)
         path = os.path.join(resolve_cached_string(parent, resolutions), name)
@@ -758,31 +787,39 @@ def fingerprint_inputs(root, build, paths, previous=None, local=False):
             except (FileNotFoundError, NotADirectoryError):
                 continue
         candidates[relative] = (path, current)
-    workers = int(os.environ.get('OHOS_INCREMENTAL_JOBS', '4'))
-    if not 1 <= workers <= 8:
-        raise ValueError('OHOS_INCREMENTAL_JOBS must be between 1 and 8')
+    return candidates
+
+
+def normalized_input_candidates(root, build, paths, workers, local):
+    values = sorted(paths)
+    root_base, build_base = os.path.abspath(root), os.path.abspath(build)
+    context = root_base, build_base, values
+    parallel = (local and len(values) >= 4096 and workers > 1 and sys.platform.startswith('linux')
+                and threading.active_count() == 1)
+    if not parallel:
+        return normalize_input_paths(context)
+    started = time.perf_counter()
+    candidates = {}
+    workers = min(workers, 4)
+    window = 2 * workers * 4096
+    with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn')) as pool:
+        for offset in range(0, len(values), window):
+            shards = ((root_base, build_base, values[index:index + 4096])
+                      for index in range(offset, min(offset + window, len(values)), 4096))
+            for shard in pool.map(normalize_input_paths, shards):
+                candidates.update(shard)
+    phase(f'input paths normalized workers={workers} paths={len(values)}', started)
+    return candidates
+
+
+def fingerprint_inputs(root, build, paths, previous=None, local=False):
+    """Normalize parents once, deduplicate aliases, and hash only changed objects."""
+    started = time.perf_counter()
+    old = previous or {}
+    workers = capture_worker_count()
+    candidates = normalized_input_candidates(root, build, paths, workers, local)
     reused = 0
     files = {}
-
-    def record_input(item):
-        name, path = item
-        try:
-            before = path.stat()
-        except (FileNotFoundError, NotADirectoryError):
-            return name, None, False
-        if not (stat_module.S_ISREG(before.st_mode) or stat_module.S_ISDIR(before.st_mode)):
-            return name, None, False
-        signature = file_signature(before)
-        cached = old.get(name)
-        if local and cached and cached.get('stat') == signature:
-            return name, cached, True
-        is_directory = stat_module.S_ISDIR(before.st_mode)
-        fingerprint = directory_digest(path) if is_directory else digest(path)
-        if file_signature(path.stat()) != signature:
-            raise RuntimeError(f'Input changed while fingerprinting: {name}')
-        return name, {'sha256': fingerprint, 'kind': 'directory' if is_directory else 'file',
-                      'mtime_ns': before.st_mtime_ns, 'executable': bool(before.st_mode & 0o111),
-                      'stat': signature}, False
 
     # Batches bound pending futures and memory; deterministic merge order also
     # keeps aliases from depending on thread completion order.
@@ -793,21 +830,44 @@ def fingerprint_inputs(root, build, paths, previous=None, local=False):
             files[name] = cached
             reused += 1
         else:
-            items.append((name, Path(path)))
+            items.append((name, Path(path), cached if local else None))
     next_progress = time.perf_counter() + 2
     if items:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for offset in range(0, len(items), 256):
-                for name, record, cached in pool.map(record_input, items[offset:offset + 256]):
-                    if record is not None:
-                        files[name] = record
-                        reused += cached
-                if time.perf_counter() >= next_progress:
-                    phase(f'input fingerprint progress inputs={len(files)} reused={reused}', started)
-                    next_progress = time.perf_counter() + 2
+        for records in fingerprint_batches(items, fingerprint_record, workers):
+            for name, record, cached in records:
+                if record is not None:
+                    files[name] = record
+                    reused += cached
+            if time.perf_counter() >= next_progress:
+                phase(f'input fingerprint progress inputs={len(files)} reused={reused}', started)
+                next_progress = time.perf_counter() + 2
     files = dict(sorted(files.items()))
-    phase(f'input fingerprints complete inputs={len(files)} reused={reused} workers={workers}', started)
+    phase(f'input fingerprints complete inputs={len(files)} reused={reused} requested_workers={workers}', started)
     return files
+
+
+def fingerprint_batch(record_input, batch):
+    return [record_input(item) for item in batch]
+
+
+def fingerprint_batches(items, record_input, workers):
+    """Bound complete shards, using independent interpreters for large captures."""
+    process_mode = (len(items) >= 4096 and workers > 1 and sys.platform.startswith('linux')
+                    and threading.active_count() == 1 and record_input is fingerprint_record)
+    if process_mode:
+        workers = min(workers, 8)
+        executor = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn'))
+    else:
+        executor = ThreadPoolExecutor(max_workers=workers)
+    phase(f'fingerprint executor={"process" if process_mode else "thread"} '
+          f'workers={workers} files_per_shard={FINGERPRINT_BATCH_SIZE}')
+    window = 2 * workers * FINGERPRINT_BATCH_SIZE
+    with executor as pool:
+        for offset in range(0, len(items), window):
+            batches = (items[index:index + FINGERPRINT_BATCH_SIZE]
+                       for index in range(offset, min(offset + window, len(items)),
+                                          FINGERPRINT_BATCH_SIZE))
+            yield from pool.map(partial(fingerprint_batch, record_input), batches)
 
 
 def depfile_inventory(build, previous=None, local=False, directory_index=None):
@@ -855,12 +915,14 @@ def depfile_inventory(build, previous=None, local=False, directory_index=None):
 
 
 def collect_retained_depfiles(build, paths, target, *, previous=None, local=False, index=None,
-                              directories=None, directory_index=None, closure=None, closure_result=None):
+                              directories=None, directory_index=None, closure=None, closure_result=None,
+                              inventory=None):
     """Discover changed inventories and reuse a bounded set of parsed rules."""
     started = time.perf_counter()
     phase('collecting retained action depfiles')
     build_base = os.path.abspath(build)
     absolute_paths = {}
+
     def absolute(value):
         if value not in absolute_paths:
             absolute_paths[value] = os.path.normpath(os.path.join(build_base, value))
@@ -868,42 +930,12 @@ def collect_retained_depfiles(build, paths, target, *, previous=None, local=Fals
     initial_paths = paths.copy()
     base_digest = hashlib.sha256('\0'.join(sorted(paths | {target})).encode()).hexdigest()
     known = {absolute(path) for path in paths | {target}}
-    records, producers, parsed = {}, {}, {}
+    records = {}
     old = previous or {}
-    reused, retained_bytes, deferred = 0, 0, 0
-    budget = PARSED_DEPFILE_CACHE_BYTES
-    def rule_bytes(rules):
-        return (sys.getsizeof(rules) + sum(sys.getsizeof(rule) +
-                sum(sys.getsizeof(words) + sum(sys.getsizeof(word) for word in words)
-                    for words in rule) for rule in rules))
-    for path in depfile_inventory(build, directories, local, directory_index):
-        relative = str(path.relative_to(build))
-        signature = file_signature(path.stat())
-        cached = old.get(relative)
-        if local and cached and cached.get('stat') == signature:
-            record = cached.copy()
-            reused += 1
-        else:
-            content, signature = stable_bytes(path)
-            fingerprint = hashlib.sha256(content).hexdigest()
-            if cached and cached.get('sha256') == fingerprint:
-                record = {**cached, 'stat': signature}
-            else:
-                rules = list(depfile_rules(content.decode('utf-8', errors='replace')))
-                outputs = [output for rule_outputs, inputs in rules if inputs for output in rule_outputs]
-                record = {'stat': signature, 'sha256': fingerprint,
-                          'rules': rules, 'outputs': outputs}
-        rules = record['rules']
-        if rules is not None:
-            size = rule_bytes(rules)
-            if retained_bytes + size > budget:
-                record['rules'] = None
-            else:
-                retained_bytes += size
-        parsed[relative] = record
-        for output in record['outputs']:
-            producers.setdefault(absolute(output), set()).add(relative)
-    phase(f'retained depfile inventory files={len(parsed)} reused={reused} parsed_cache_bytes={retained_bytes}', started)
+    deferred = 0
+    if inventory is None:
+        inventory = scan_retained_depfiles(build, previous, local, directories, directory_index)
+    parsed, producers = inventory
     same_inventory = (closure is not None and closure.get('base') == base_digest
                       and parsed.keys() == old.keys()
                       and all(old[name]['sha256'] == record['sha256'] for name, record in parsed.items()))
@@ -951,6 +983,80 @@ def collect_retained_depfiles(build, paths, target, *, previous=None, local=Fals
     return records
 
 
+def retained_depfile_record(path, cached, local):
+    signature = file_signature(path.stat())
+    if local and cached and cached.get('stat') == signature:
+        return cached.copy(), True
+    content, signature = stable_bytes(path)
+    fingerprint = hashlib.sha256(content).hexdigest()
+    if cached and cached.get('sha256') == fingerprint:
+        return {**cached, 'stat': signature}, False
+    rules = list(depfile_rules(content.decode('utf-8', errors='replace')))
+    outputs = [output for rule_outputs, inputs in rules if inputs for output in rule_outputs]
+    return {'stat': signature, 'sha256': fingerprint, 'rules': rules, 'outputs': outputs}, False
+
+
+def parsed_rule_bytes(rules):
+    return (sys.getsizeof(rules) + sum(sys.getsizeof(rule) +
+            sum(sys.getsizeof(words) + sum(sys.getsizeof(word) for word in words)
+                for words in rule) for rule in rules))
+
+
+def scan_retained_depfiles(build, previous=None, local=False, directories=None, directory_index=None):
+    """Read the complete depfile inventory independently of the Ninja input set."""
+    started = time.perf_counter()
+    old, parsed, producers = previous or {}, {}, {}
+    build_base = os.path.abspath(build)
+    reused, retained_bytes = 0, 0
+    for path in depfile_inventory(build, directories, local, directory_index):
+        relative = str(path.relative_to(build))
+        record, cached = retained_depfile_record(path, old.get(relative), local)
+        reused += cached
+        if record['rules'] is not None:
+            size = parsed_rule_bytes(record['rules'])
+            if retained_bytes + size > PARSED_DEPFILE_CACHE_BYTES:
+                record['rules'] = None
+            else:
+                retained_bytes += size
+        parsed[relative] = record
+        for output in record['outputs']:
+            absolute = os.path.normpath(os.path.join(build_base, output))
+            producers.setdefault(absolute, set()).add(relative)
+    phase(f'retained depfile inventory files={len(parsed)} reused={reused} '
+          f'parsed_cache_bytes={retained_bytes}', started)
+    return parsed, producers
+
+
+def collect_capture_inventory(root, build, target, cache, local):
+    """Join bounded read-only stages before fingerprinting or publishing state."""
+    deps_path = build / '.ninja_deps'
+    deps_digest = digest(deps_path) if deps_path.is_file() else None
+    same_deps = bool(cache and cache.get('deps_sha256') == deps_digest)
+    directories = {}
+    workers = min(3, capture_worker_count())
+    graph_started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        graph_task = pool.submit(graph_content_records, root, build,
+                                 cache.get('graph') if cache else None, local)
+        inventory_task = pool.submit(scan_retained_depfiles, build,
+                                     cache.get('depfiles') if cache else None, local,
+                                     cache.get('directories') if cache else None, directories)
+        deps_task = None if same_deps else pool.submit(collect_ninja_paths, root, build, 'deps', target)
+        graph = graph_task.result()
+        same_graph = bool(cache and same_graph_content(cache.get('graph'), graph))
+        phase(f'complete Ninja graph checked files={len(graph or {})} same_content={same_graph}', graph_started)
+        inputs_task = None if same_graph else pool.submit(collect_ninja_paths, root, build, 'inputs', target)
+        if same_graph and same_deps:
+            deps = set(cache['ninja_deps'])
+        else:
+            deps_task = deps_task or pool.submit(collect_ninja_paths, root, build, 'deps', target)
+            deps = deps_task.result()
+        inputs = set(cache['ninja_inputs']) if same_graph else inputs_task.result()
+        inventory = inventory_task.result()
+    phase(f'Ninja inventory reused inputs={same_graph} deps={same_graph and same_deps}')
+    return graph, deps_digest, same_graph, same_deps, inputs, deps, inventory, directories
+
+
 def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *, previous=None, cache=None):
     started = time.perf_counter()
     print('incremental workspace: recording successful build baseline', flush=True)
@@ -959,13 +1065,6 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
     # copy, host change or independent checkout still has a different identity.
     local = bool(cache and all(cache.get('instance', {}).get(key) == value
                                for key, value in instance.items()))
-    graph_started = time.perf_counter()
-    graph = graph_content_records(root, build, cache.get('graph') if cache else None, local)
-    same_graph = bool(cache and same_graph_content(cache.get('graph'), graph))
-    deps_path = build / '.ninja_deps'
-    deps_digest = digest(deps_path) if deps_path.is_file() else None
-    same_deps = bool(cache and cache.get('deps_sha256') == deps_digest)
-    phase(f'complete Ninja graph checked files={len(graph or {})} same_content={same_graph}', graph_started)
     if cache and allow_dirty:
         count = previous.get('baseline_planned') if previous else None
         phase('Ninja audit skipped: successful make_all; previous diagnostic count retained')
@@ -976,22 +1075,21 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
         phase(f'Ninja audit complete planned={count}', audit_started)
         if code or (count and not allow_dirty):
             raise RuntimeError(f'Cannot seal a clean baseline: exit={code}, planned={count}.\n' + output[-4000:])
-    inputs = set(cache['ninja_inputs']) if same_graph else collect_ninja_paths(root, build, 'inputs', target)
-    deps = set(cache['ninja_deps']) if same_graph and same_deps else collect_ninja_paths(root, build, 'deps', target)
-    phase(f'Ninja inventory reused inputs={same_graph} deps={same_graph and same_deps}')
+    graph, deps_digest, same_graph, same_deps, inputs, deps, inventory, directory_index = \
+        collect_capture_inventory(root, build, target, cache, local)
     paths = inputs | deps
     depfile = build / 'build.ninja.d'
     if depfile.exists():
         for _, values in depfile_rules(depfile.read_text()):
             paths.update(values)
-    dep_index, directory_index, closure_index = {}, {}, {}
+    dep_index, closure_index = {}, {}
     retained = collect_retained_depfiles(build, paths, target,
                                         previous=cache.get('depfiles') if cache else None,
                                         local=local, index=dep_index,
                                         directories=cache.get('directories') if cache else None,
                                         directory_index=directory_index,
                                         closure=cache.get('closure') if cache else None,
-                                        closure_result=closure_index)
+                                        closure_result=closure_index, inventory=inventory)
     fingerprints = previous.get('files', {}) if previous else {}
     verified = load_verified_inputs(root, build)
     if verified:
