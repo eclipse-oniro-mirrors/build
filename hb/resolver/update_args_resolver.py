@@ -36,7 +36,7 @@ class UpdateArgsResolver(ArgsResolverInterface):
     @staticmethod
     def resolve_part(target_arg: Arg, update_module: UpdateModuleInterface):
         part_name = target_arg.arg_value
-        if len(sys.argv) > 2 and not sys.argv[2].startswith("-"): # 第一个部件名参数 
+        if len(sys.argv) > 2 and not sys.argv[2].startswith("-"): # 第一个部件名参数
             part_name = sys.argv[2]
         if part_name:
             update_module.hpm.regist_flag('part_name', part_name)

@@ -45,7 +45,7 @@ def _get_components_info(components_info_dict, external_module_name):
         if external_module.get("name") == external_module_name:
             external_module_result = external_module
             break
-    return external_module_result        
+    return external_module_result
 
 
 def _get_external_module_info(parts_inner_kits_info, components_info, external_part_name,
@@ -75,7 +75,7 @@ def _get_external_module_info(parts_inner_kits_info, components_info, external_p
             raise Exception(
                 "external dep module '{}' doesn't exist in part '{}'.".format(
                     external_module_name, external_part_name))
-        external_module_desc_info['prebuilt_enable'] = False            
+        external_module_desc_info['prebuilt_enable'] = False
     return external_module_desc_info
 
 

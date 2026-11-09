@@ -172,7 +172,6 @@ class Arg():
         self._resolve_function = resolve_function
     
     def __str__(self):
-        #return f"Arg(name={self._arg_name}, help={self._arg_help}, phase={self._arg_phase}, attribute={self._arg_attribute}, type={self._arg_type}, value={self._arg_value}, resolve_function={self._resolve_function})"
         return f"{self._arg_name}={self._arg_value}"
     
     def __repr__(self):
