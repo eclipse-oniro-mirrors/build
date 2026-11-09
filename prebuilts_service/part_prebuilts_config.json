@@ -213,6 +213,11 @@
         "app",
         "sdk"
     ],
+    "hidumper":[
+        "app",
+        "hvigor",
+        "sdk"
+    ],
     "av_session":[
         "app"
     ],
