@@ -17,7 +17,7 @@ Transfer out/ with nanosecond mtimes, symlinks and both Ninja state files intact
 import argparse
 import base64
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from functools import partial
 import multiprocessing
 import threading
@@ -1226,6 +1226,143 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
     phase('baseline capture complete', started)
 
 
+_RESTORE_RESOLUTIONS = None
+RESTORE_BATCH_SIZE = 256
+RESTORE_PARALLEL_MIN_INPUTS = 4096
+
+
+def restore_worker_count():
+    available = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
+    limits = []
+    try:
+        memberships = Path('/proc/self/cgroup').read_text().splitlines()
+    except OSError:
+        memberships = []
+    for line in memberships:
+        _, controllers, relative = line.split(':', 2)
+        bases = ([Path('/sys/fs/cgroup')] if not controllers else
+                 [Path('/sys/fs/cgroup/cpu'), Path('/sys/fs/cgroup/cpu,cpuacct')]
+                 if 'cpu' in controllers.split(',') else [])
+        for base in bases:
+            current = base / relative.lstrip('/')
+            if not current.is_dir():
+                current = base
+            while current.is_relative_to(base):
+                try:
+                    if not controllers:
+                        quota, period = (current / 'cpu.max').read_text().split()
+                    else:
+                        quota = (current / 'cpu.cfs_quota_us').read_text().strip()
+                        period = (current / 'cpu.cfs_period_us').read_text().strip()
+                    if quota != 'max' and int(quota) > 0 and int(period) > 0:
+                        limits.append(max(1, int(quota) // int(period)))
+                except (OSError, ValueError):
+                    pass
+                if current == base:
+                    break
+                current = current.parent
+    requested = int(os.environ.get('OHOS_INCREMENTAL_RESTORE_JOBS', '8'))
+    if not 1 <= requested <= 32:
+        raise ValueError('OHOS_INCREMENTAL_RESTORE_JOBS must be between 1 and 32')
+    return min(requested, available, *limits) if limits else min(requested, available)
+
+
+def restore_read_batch(root_name, names):
+    global _RESTORE_RESOLUTIONS
+    if _RESTORE_RESOLUTIONS is None:
+        _RESTORE_RESOLUTIONS = {}
+    cache = _RESTORE_RESOLUTIONS
+    root = Path(root_name)
+    resolved_root = resolve_cached_string(root, cache)
+    prefix = resolved_root.rstrip(os.sep) + os.sep
+    results = []
+    for name in names:
+        path = root / name
+        if Path(name).is_absolute() or '..' in Path(name).parts or path.is_symlink():
+            raise ValueError(f'Invalid source input: {name}')
+        resolved = os.path.join(resolve_cached_string(path.parent, cache), path.name)
+        if resolved != resolved_root and not resolved.startswith(prefix):
+            raise ValueError(f'Invalid source input: {name}')
+        try:
+            before = path.stat()
+        except FileNotFoundError:
+            results.append((name, None, None, None))
+            continue
+        directory = stat_module.S_ISDIR(before.st_mode)
+        fingerprint = directory_digest(path) if directory else digest(path)
+        after = path.stat()
+        if file_signature(before) != file_signature(after):
+            raise RuntimeError(f'Input changed while restoring: {name}; retry the build')
+        results.append((name, directory, fingerprint, file_signature(after)))
+    return results
+
+
+def restore_parallel(root, data, workers, verified, started):
+    counts = {'restored': 0, 'changed': 0, 'missing': 0}
+    names = iter(data['files'])
+    processed = 0
+    next_report = started + 2
+    phase(f'input restore executor=process workers={workers} files_per_shard={RESTORE_BATCH_SIZE}')
+    def next_batch():
+        batch = []
+        for _ in range(RESTORE_BATCH_SIZE):
+            name = next(names, None)
+            if name is None:
+                break
+            batch.append(name)
+        return batch
+    with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn')) as pool:
+        pending = set()
+        for _ in range(2 * workers):
+            batch = next_batch()
+            if batch:
+                pending.add(pool.submit(restore_read_batch, str(root), batch))
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                results = future.result()
+                batch = next_batch()
+                if batch:
+                    pending.add(pool.submit(restore_read_batch, str(root), batch))
+                for name, directory, fingerprint, signature in results:
+                    path = root / name
+                    if signature is None:
+                        counts['missing'] += 1
+                        processed += 1
+                        continue
+                    # A previous alias may have updated this inode's mtime.
+                    # Revalidate instead of applying a stale worker result.
+                    if file_signature(path.lstat()) != signature:
+                        _, directory, fingerprint, signature = restore_read_batch(str(root), [name])[0]
+                        if signature is None:
+                            counts['missing'] += 1
+                            processed += 1
+                            continue
+                    record = data['files'][name]
+                    executable = bool(signature[5] & 0o111)
+                    if (directory != (record.get('kind') == 'directory')
+                            or fingerprint != record['sha256']
+                            or executable != record.get('executable', executable)):
+                        if data.get('mtime_ceiling_ns', 0) >= time.time_ns():
+                            raise RuntimeError('Snapshot outputs are newer than the host clock; synchronize clocks before restoring changed inputs')
+                        os.utime(path, None, follow_symlinks=False)
+                        counts['changed'] += 1
+                    elif signature[3] != record['mtime_ns']:
+                        os.utime(path, ns=(path.stat().st_atime_ns, record['mtime_ns']), follow_symlinks=False)
+                        counts['restored'] += 1
+                    current = path.stat()
+                    if verified is not None and [current.st_dev, current.st_ino, current.st_size, current.st_mode] == [signature[i] for i in (0, 1, 2, 5)]:
+                        verified[name] = {'sha256': fingerprint, 'kind': 'directory' if directory else 'file',
+                                          'mtime_ns': current.st_mtime_ns, 'executable': bool(current.st_mode & 0o111),
+                                          'stat': file_signature(current)}
+                    processed += 1
+                if time.perf_counter() >= next_report:
+                    phase(f'input restore progress={processed}/{len(data["files"])}', started)
+                    next_report = time.perf_counter() + 2
+    print(json.dumps(counts))
+    phase(f'input restore complete inputs={len(data["files"])}', started)
+
+
 def restore(root, data, *, tools_validated=False, verified=None):
     canonical = Path(data['canonical_root']) if 'canonical_root' in data else root
     if root != canonical:
@@ -1236,6 +1373,9 @@ def restore(root, data, *, tools_validated=False, verified=None):
     started = time.perf_counter()
     total = len(data['files'])
     phase(f'restoring transferred inputs total={total}')
+    workers = restore_worker_count()
+    if total >= RESTORE_PARALLEL_MIN_INPUTS and workers > 1 and sys.platform.startswith('linux'):
+        return restore_parallel(root, data, workers, verified, started)
     next_report = started + 2
     counts = {'restored': 0, 'changed': 0, 'missing': 0}
     resolutions = {}

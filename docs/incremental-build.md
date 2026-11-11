@@ -83,6 +83,20 @@ an unrelated out/<product>/src link cannot abort discovery. I/O errors from
 the actual source/output filesystem or a relevant CMake cache still fail
 explicitly; these checks do not turn filesystem failures into successful builds.
 
+Large first-transfer checks on Linux validate inputs in process shards, with
+256 files per shard and at most two queued shards per worker. The default is
+eight workers, capped by CPU affinity and cgroup CPU quotas. The parent process
+rechecks returned file identities before restoring timestamps and collects the
+verified input records for the same build's finish step. Hard-link aliases with
+changed metadata are revalidated. A worker failure prevents publishing a new
+restore-state acknowledgment and stops the build before compilation.
+
+Set `OHOS_INCREMENTAL_RESTORE_JOBS=1` to use the serial restore path, or choose a
+value from 1 to 32 to tune the first-transfer worker count. This option does not
+set Ninja's parallelism or change baseline collection workers. Small input sets
+retain the serial path. When the existing baseline/instance acknowledgment
+matches, restoration is skipped without creating a process pool.
+
 Install bubblewrap on Linux before relocating a workspace. Ordinary in-place
 builds do not require a namespace and retain their build-time behavior. Keep
 symlinks, nanosecond mtimes, .ninja_log and .ninja_deps when archiving the complete
