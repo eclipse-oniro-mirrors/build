@@ -22,8 +22,6 @@ from typing import Any
 try:
     from .validation_model import (
         RESERVED_EVENT_TYPES,
-        SUPPORTED_SUBCOMMAND_FIELDS,
-        SUPPORTED_TOP_LEVEL_FIELDS,
         ValidationResult,
         json_pointer,
     )
@@ -31,8 +29,6 @@ try:
 except ImportError:
     from validation_model import (
         RESERVED_EVENT_TYPES,
-        SUPPORTED_SUBCOMMAND_FIELDS,
-        SUPPORTED_TOP_LEVEL_FIELDS,
         ValidationResult,
         json_pointer,
     )
@@ -50,7 +46,6 @@ def validate_config(data: dict[str, Any], result: ValidationResult) -> None:
 
 
 def validate_top_level(data: dict[str, Any], result: ValidationResult) -> None:
-    _validate_allowed_fields(data, SUPPORTED_TOP_LEVEL_FIELDS, "/", "TOP_fields_001", result)
     _validate_name(data, result)
     _validate_required_string(data, "version", "TOP_version_001", result)
     _validate_required_string(data, "description", "TOP_description_001", result)
@@ -103,7 +98,6 @@ def validate_subcommand_definition(
     if not isinstance(definition, dict):
         result.add_issue("SUB_subcommands_001", path, "subcommand definition must be object")
         return
-    _validate_allowed_fields(definition, SUPPORTED_SUBCOMMAND_FIELDS, path, "SUB_fields_001", result)
     _validate_required_string(definition, "description", "SUB_description_001", result, path)
     _validate_string_array_field(
         definition,
@@ -135,19 +129,6 @@ def validate_subcommand_definition(
         "SUB_eventSchemas_101",
         result,
     )
-
-
-def _validate_allowed_fields(
-    data: dict[str, Any],
-    allowed_fields: set[str],
-    path: str,
-    issue_code: str,
-    result: ValidationResult,
-) -> None:
-    for key in data:
-        if key in allowed_fields:
-            continue
-        result.add_issue(issue_code, json_pointer(path, key), f"unsupported field '{key}'")
 
 
 def _validate_name(data: dict[str, Any], result: ValidationResult) -> None:
