@@ -271,6 +271,7 @@ template("ohos_app") {
                              [
                                "sdk_home",
                                "hvigor_home",
+                               "whitelist_prefix",
                              ])
       script = "//build/scripts/check_hvigor_hap.py"
       outputs = [ "${target_out_dir}/${target_name}.txt" ]
@@ -296,6 +297,12 @@ template("ohos_app") {
         args += [
           "--hvigor-home",
           rebase_path(hvigor_home, "//"),
+        ]
+      }
+      if (defined(whitelist_prefix) && whitelist_prefix != "") {
+        args += [
+          "--whitelist-prefix",
+          whitelist_prefix,
         ]
       }
     }
