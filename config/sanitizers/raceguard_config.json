@@ -1,0 +1,27 @@
+{
+  "plugin_name": "libclang_rt.raceguard-aarch64.so",
+  "ban_subsystem_name": [
+    "build",
+    "thirdparty",
+    "testfwk"
+  ],
+  "ban_part_name": [
+    "faultloggerd",
+    "hilog",
+    "hilog_override",
+    "init",
+    "init_ext",
+    "c_utils",
+    "config_policy",
+    "musl",
+    "musl_opt",
+    "updater_ext",
+    "sanitizerd",
+    "hiprofiler",
+    "intelligent_voice_framework",
+    "neural_network_runtime_ext"
+  ],
+  "external_deps": [
+    "sanitizerd:libraceguard_rt"
+  ]
+}
