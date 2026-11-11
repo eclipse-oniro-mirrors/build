@@ -5,8 +5,16 @@ its out/ directory, then runs the existing build command:
 
 ```bash
 ./build.sh --product-name x86_64_virt --build-target make_all --ccache \
-  --gn-args runtime_core_enable_codegen=false --deps-guard=false
+  --gn-args runtime_core_enable_codegen=false
 ```
+
+For products that enable `build_framework_enable_incremental_build`, overlap
+statistics and deps guard default to disabled. This applies to the first build,
+ordinary incremental builds and `--fast-rebuild`. Explicit
+`--compute-overlap-rate=true` or `--deps-guard=true` enables the corresponding
+check; explicit false values are also preserved. Products with the feature
+disabled or absent retain their existing defaults. These options control
+post-build analysis, not the compiler's dependency tracking.
 
 ## Automatic baseline and relocation
 
@@ -116,8 +124,13 @@ database, retained depfile inventory, transitive input closure and source
 fingerprints. Unsupported include syntax falls back to Ninja tool queries.
 Directory identities discover added/deleted depfiles. Source reuse checks device,
 inode, size, modification time, change time and mode on the same filesystem
-instance; timestamps alone do not prove unchanged contents. Parsed depfile rules
-are bounded to 64 MiB, with deferred parsing for reachable uncached rules.
+instance; timestamps alone do not prove unchanged contents. Parsed depfile input
+lists are compressed and bounded to 64 MiB, with deferred parsing for reachable
+uncached rules. Unrelated depfile changes can reuse the existing closure only
+when its retained producers and reachable paths remain unaffected. Timestamp-only
+depfile rewrites refresh cached metadata after all unchanged-build checks pass.
+Relocation checks reuse parent-directory resolutions within the current restore
+call while retaining the per-input content and workspace-boundary checks.
 
 An unchanged finish validates that inventory without rebuilding the parsed
 closure. It also checks previously absent input candidates and tool identities,

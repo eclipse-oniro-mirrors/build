@@ -997,6 +997,17 @@ class BuildArgsResolver(ArgsResolverInterface):
         """
         if target_arg.arg_value:
             config = Config()
+            # Preserve explicit CLI choices, including argparse abbreviations.
+            option = '--compute-overlap-rate'
+            explicit = any(option.startswith(arg.split('=', 1)[0])
+                           for arg in sys.argv[2:] if arg.startswith('--') and arg != '--')
+            if not explicit:
+                from scripts.incremental_product_policy import product_feature
+                if product_feature(config.root_path, config.product_json):
+                    target_arg.arg_value = False
+                    LogUtil.hb_info('Incremental build enabled: overlap statistics disabled by default; '
+                                    'use --compute-overlap-rate=true to enable')
+                    return
             subsystem_config_overlay_path = os.path.join(config.product_path,
                                                          'subsystem_config_overlay.json')
             if os.path.isfile(subsystem_config_overlay_path):
@@ -1031,6 +1042,17 @@ class BuildArgsResolver(ArgsResolverInterface):
         """
         if target_arg.arg_value:
             config = Config()
+            # Preserve explicit CLI choices, including argparse abbreviations.
+            option = '--deps-guard'
+            explicit = any(option.startswith(arg.split('=', 1)[0])
+                           for arg in sys.argv[2:] if arg.startswith('--') and arg != '--')
+            if not explicit:
+                from scripts.incremental_product_policy import product_feature
+                if product_feature(config.root_path, config.product_json):
+                    target_arg.arg_value = False
+                    LogUtil.hb_info('Incremental build enabled: deps guard disabled by default; '
+                                    'use --deps-guard=true to enable')
+                    return
             if config.os_level == "standard" and config.compile_mode != 'host':
                 sys.path.append(os.path.join(
                     config.root_path, "developtools/integration_verification/tools/deps_guard"))
