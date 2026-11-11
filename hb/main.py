@@ -159,7 +159,8 @@ class Main():
     def _prebuild_ohos_sdk(self, args_dict: dict):
         prebuilt_sdk_service = PrebuiltSdk(args_dict=args_dict)
         if prebuilt_sdk_service.should_build_sdk(args_dict):
-            prebuilt_sdk_service.run()
+            if not prebuilt_sdk_service.run():
+                raise RuntimeError('Required source SDK build/publication failed; product build stopped')
 
     def _init_build_module(self) -> BuildModuleInterface:
         args_dict = Arg.parse_all_args(ModuleType.BUILD)

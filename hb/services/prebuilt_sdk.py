@@ -22,6 +22,8 @@ import shutil
 import platform
 import re
 import stat
+import importlib.util
+from pathlib import Path
 from containers.arg import Arg
 from services.interface.prebuilt_sdk_interface import PrebuiltSdkInterface
 from resources.global_var import CURRENT_OHOS_ROOT
@@ -44,14 +46,43 @@ class PrebuiltSdk(PrebuiltSdkInterface):
         if args_dict.get("product_name").arg_value == 'ohos-sdk':
             return False
 
-        sdk_path = os.path.join(self.sdk_prebuilts_path, 'linux', self.api_version)
-        if os.path.exists(sdk_path):
-            return False
-
         if args_dict.get("prebuilt_sdk").arg_value is False:
             return False
+        sdk_path = os.path.join(self.sdk_prebuilts_path, 'linux', self.api_version)
+        if os.path.exists(sdk_path):
+            # Explicitly shared/preinstalled packages are not source SDKs.
+            sdk_root = Path(self.sdk_prebuilts_path).resolve()
+            default_root = Path(CURRENT_OHOS_ROOT).resolve()/'prebuilts/ohos-sdk'
+            if sdk_root != default_root or not self._source_sdk_tools().dependencies.is_within(Path(sdk_path).resolve(), sdk_root):
+                return False
+            tools = self._source_sdk_tools()
+            if (self._reuse_source_sdk_configuration(args_dict)
+                    and not tools.state_path(CURRENT_OHOS_ROOT, self.api_version).exists()):
+                # An untracked package keeps the original existence-only policy.
+                # A normal build can establish source SDK provenance later.
+                return False
+            return tools.needs_build(CURRENT_OHOS_ROOT, self.api_version, self._source_sdk_context(args_dict))
 
         return True
+
+    def _source_sdk_tools(self):
+        if not hasattr(self, '_source_sdk_module'):
+            spec = importlib.util.spec_from_file_location('_ohos_source_sdk',
+                Path(CURRENT_OHOS_ROOT)/'build/scripts/source_sdk.py')
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self._source_sdk_module = module
+        return self._source_sdk_module
+
+    @staticmethod
+    def _reuse_source_sdk_configuration(args_dict):
+        fast = getattr(args_dict.get('fast_rebuild'), 'arg_value', False)
+        overrides = getattr(args_dict.get('prebuilts_sdk_gn_args'), 'arg_value', [])
+        return fast and not overrides
+
+    def _source_sdk_context(self, args_dict):
+        values = self._prepare_build_args(args_dict)
+        return {'gn_args': values['gn_args_parts'], 'sbom': values['generate_sbom']}
 
     def build_prebuilt_sdk(self, args_dict) -> bool:
         try:
@@ -68,6 +99,8 @@ class PrebuiltSdk(PrebuiltSdkInterface):
                 return False
 
             self._migrate_legacy_sdk()
+            self._source_sdk_tools().record_success(CURRENT_OHOS_ROOT, self.api_version,
+                                                    self._source_sdk_context(args_dict))
 
             LogUtil.hb_info('ohos-sdk build completed successfully!')
             return True
@@ -83,7 +116,11 @@ class PrebuiltSdk(PrebuiltSdkInterface):
 
     def run(self):
         """Implement ServiceInterface run method"""
-        return self.build_prebuilt_sdk(self._args_dict)
+        tools = self._source_sdk_tools()
+        with tools.dependencies.lock(str(tools.state_path(CURRENT_OHOS_ROOT, self.api_version))+'.lock'):
+            if not self.should_build_sdk(self._args_dict):
+                return True
+            return self.build_prebuilt_sdk(self._args_dict)
 
     def _execute_sdk_build(self, build_args: dict) -> bool:
         """Execute SDK build command"""
@@ -156,6 +193,23 @@ class PrebuiltSdk(PrebuiltSdkInterface):
                     if vv:
                         gn_args_parts.append(vv)
 
+        if self._reuse_source_sdk_configuration(args_dict):
+            tools = self._source_sdk_tools()
+            state = tools.state_path(CURRENT_OHOS_ROOT, self.api_version)
+            if state.exists():
+                previous = tools.dependencies.read_json(state)
+                context = previous.get('context', {})
+                recorded_args = context.get('gn_args') if isinstance(context, dict) else None
+                if (previous.get('schema') != 1 or previous.get('api') != self.api_version
+                        or not isinstance(recorded_args, list) or not recorded_args
+                        or not all(isinstance(value, str) and value.strip() for value in recorded_args)):
+                    raise RuntimeError('Cannot recover source SDK configuration for --fast-rebuild; '
+                                       'rerun without --fast-rebuild and pass the original '
+                                       '--prebuilts-sdk-gn-args')
+                # Use the selected recipe for both validation and a required
+                # rebuild; SDK source changes must not switch its configuration.
+                gn_args_parts = list(recorded_args)
+
         return {
             'ccache_args': 'true' if ccache_enabled else 'false',
             'xcache_args': 'true' if xcache_enabled else 'false',
@@ -166,56 +220,7 @@ class PrebuiltSdk(PrebuiltSdkInterface):
     def _post_process_sdk(self, api_version: str) -> bool:
         """SDK post-processing logic"""
         try:
-            root_path = CURRENT_OHOS_ROOT
-            sdk_prebuilts_path = self.sdk_prebuilts_path
-
-            # Clean up old SDK directory
-            old_sdk_path = os.path.join(root_path, 'prebuilts', 'ohos-sdk', 'linux')
-            if os.path.exists(old_sdk_path):
-                shutil.rmtree(old_sdk_path)
-
-            # Create new SDK directory
-            os.makedirs(sdk_prebuilts_path, exist_ok=True)
-
-            # Move build artifacts
-            out_sdk_path = os.path.join(root_path, 'out', 'sdk', 'ohos-sdk', 'linux')
-            if os.path.exists(out_sdk_path):
-                shutil.move(out_sdk_path, sdk_prebuilts_path)
-
-            # Handle native related files
-            native_dirs = [
-                os.path.join(root_path, 'out', 'sdk', 'sdk-native', 'os-irrelevant'),
-                os.path.join(root_path, 'out', 'sdk', 'sdk-native', 'os-specific', 'linux')
-            ]
-
-            native_target = os.path.join(sdk_prebuilts_path, 'linux', 'native')
-            os.makedirs(native_target, exist_ok=True)
-
-            for native_dir in native_dirs:
-                if os.path.exists(native_dir):
-                    for item in os.listdir(native_dir):
-                        src = os.path.join(native_dir, item)
-                        dst = os.path.join(native_target, item)
-                        if os.path.exists(dst):
-                            if os.path.isdir(dst):
-                                shutil.rmtree(dst)
-                            else:
-                                os.remove(dst)
-                        shutil.move(src, dst)
-
-            # Organize API version directory structure
-            linux_sdk_path = os.path.join(sdk_prebuilts_path, 'linux')
-            api_dir = os.path.join(linux_sdk_path, api_version)
-            os.makedirs(api_dir, exist_ok=True)
-
-            for item in os.listdir(linux_sdk_path):
-                item_path = os.path.join(linux_sdk_path, item)
-                if os.path.isdir(item_path) and item != api_version:
-                    target_path = os.path.join(api_dir, item)
-                    shutil.move(item_path, target_path)
-
-            self._create_previewer_package(api_version)
-
+            self._source_sdk_tools().publish(CURRENT_OHOS_ROOT, api_version)
             return True
 
         except Exception as e:

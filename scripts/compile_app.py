@@ -24,10 +24,12 @@ import json5
 import uuid
 import zipfile
 import tempfile
+import hashlib
 from pathlib import Path
 
 from util import build_utils
 from util import file_utils
+import hap_dependencies
 
 
 def parse_args(args):
@@ -148,7 +150,7 @@ def get_hvigor_version(cwd: str, hash_value: str):
 
 def get_unsigned_hap_path(module: str, src_path: str, cwd: str, options, hash_value: str):
     hvigor_version = get_hvigor_version(cwd, hash_value)
-    product_name = options.build_profile.replace("/build-profile.json5", "").split("/")[-1]
+    project_name = options.build_profile.replace("/build-profile.json5", "").split("/")[-1]
     model_version = get_integrated_project_config(cwd, hash_value)
     product_value = options.product if options.product else 'default'
     if product_value is None:
@@ -196,7 +198,7 @@ def get_target_by_module(module: str, options):
     return "default"
 
 
-def gen_unsigned_hap_path_json(build_profile: str, cwd: str, options, hash_value: str):
+def gen_unsigned_hap_path_json(build_profile: str, cwd: str, options, hash_value: str, write=True):
     '''
     Generate unsigned_hap_path_list
     :param build_profile: module compilation information file
@@ -221,7 +223,13 @@ def gen_unsigned_hap_path_json(build_profile: str, cwd: str, options, hash_value
             if hsp_file:
                 unsigned_hap_path_list.extend(hsp_file)
         unsigned_hap_path_json['unsigned_hap_path_list'] = unsigned_hap_path_list
-    file_utils.write_json_file(options.output_file, unsigned_hap_path_json)
+    if options.depfile and not unsigned_hap_path_list and any(
+            task.lower() in ('assembleapp', 'assemblehap', 'assemblehsp')
+            for task in options.assemble_type.split(',')):
+        raise RuntimeError('Hvigor succeeded but no required unsigned HAP/HSP was generated')
+    if write:
+        file_utils.write_json_file(options.output_file, unsigned_hap_path_json)
+    return unsigned_hap_path_json
 
 
 def copy_libs(cwd: str, system_lib_module_info_list: list, ohos_app_abi: str, module_libs_dir: str):
@@ -295,7 +303,7 @@ def get_node_path(nodejs_home_config: str, options):
     if nodejs_home_config == None:
         return None
     host_os = options.host_os
-    code_home = os.path.dirname(os.path.dirname(os.path.dirname(options.sdk_home)))
+    code_home = get_root_dir()
     if host_os == "mac":
         return os.path.join(code_home, f"prebuilts/build-tools/common/nodejs/node-v{nodejs_home_config}-darwin-x64/bin/node")
     elif host_os == "linux" and host_os == "arm64":
@@ -306,13 +314,15 @@ def get_node_path(nodejs_home_config: str, options):
 
 def get_hvigor_cache_dir(options, cache_base: str) -> str:
     real_cwd = os.path.realpath(options.cwd)
-    real_root = os.path.realpath(options.root_dir)
+    real_root = os.path.realpath(getattr(options, 'root_dir', None) or get_root_dir())
     if os.path.commonpath([real_root, real_cwd]) == real_root:
         rel_cwd = os.path.relpath(real_cwd, real_root)
     else:
         rel_cwd = uuid.uuid5(uuid.NAMESPACE_URL, real_cwd).hex
 
     hvigor_cache_dir = os.path.join(cache_base, 'hvigor_cache', rel_cwd)
+    if getattr(options, '_sdk_identity', None):
+        hvigor_cache_dir = os.path.join(hvigor_cache_dir, options._sdk_identity)
     os.makedirs(hvigor_cache_dir, exist_ok=True)
 
     return hvigor_cache_dir
@@ -322,14 +332,14 @@ def build_hvigor_cmd(cwd: str, model_version: str, options, hash_val: str):
     cmd = ['bash']
     hvigor_version = get_hvigor_version(cwd, hash_val)
     nodejs_home = None
-    code_home = os.path.dirname(os.path.dirname(os.path.dirname(options.sdk_home)))
+    code_home = get_root_dir()
     with open(os.path.join(code_home, "build/scripts/app_config.json"), 'r') as file:
         config = json.load(file)
     if options.hvigor_home:
         cmd.extend([f'{os.path.abspath(options.hvigor_home)}/bin/hvigorw'])
     elif model_version:
         hvigor_home_config, node_home_config = get_hvigor_home_from_config(model_version, config)	
-        prebuilts_home = os.path.dirname(os.path.dirname(options.sdk_home))	
+        prebuilts_home = os.path.join(code_home, 'prebuilts')
         if hvigor_home_config:	
             hvigor_home = os.path.join(os.path.dirname(prebuilts_home), hvigor_home_config)
         else:
@@ -381,6 +391,8 @@ def build_hvigor_cmd(cwd: str, model_version: str, options, hash_val: str):
             cmd.extend(['-c', f'properties.ohos.buildDir="{output_dir}"'])
         
     cmd.extend(['--no-daemon'])
+    if getattr(options, '_sdk_changed', False):
+        cmd.append('--no-incremental')
     
     print(f"[0/0] [{hash_val}] hvigor cmd: " + ' '.join(cmd))
     return cmd
@@ -446,6 +458,7 @@ def hvigor_build(cwd: str, options, hash_value: str, node_home: str):
     
     print(f"[0/0] [{hash_value}] Hvigor build start")
     hvigor_write_log(cmd, cwd, env, hash_value)
+    return cmd
 
 
 def strip_rpcid_from_haps(build_profile: str, cwd: str, options, hash_value: str):
@@ -505,11 +518,30 @@ def _strip_rpcid_from_pkg(raw_pkg_path: str, hash_value: str):
 def main(args):
     options = parse_args(args)
     cwd = os.path.abspath(options.cwd)
+    if options.depfile:
+        identity = hashlib.sha256(os.path.relpath(cwd, get_root_dir()).encode()).hexdigest()
+        with hap_dependencies.lock(Path(get_root_dir())/'out/.hap-locks'/(identity+'.lock')):
+            return compile_project(options, cwd)
+    return compile_project(options, cwd)
+
+
+def compile_project(options, cwd):
     hash_result = uuid.uuid4()
     hash_value = str(hash_result).split("-")[0]
     model_version = get_integrated_project_config(cwd, hash_value)
     print(model_version)
-    code_home = os.path.dirname(os.path.dirname(os.path.dirname(options.sdk_home)))
+    code_home = get_root_dir()
+    sdk_state = Path(options.output_file).with_suffix('.sdk-inputs.json')
+    if options.depfile:
+        with open(options.build_profile) as stream:
+            profile = json5.load(stream)
+        sdk_location = os.path.relpath(os.path.abspath(options.sdk_home), code_home)
+        cache_name = hashlib.sha256(sdk_location.encode()).hexdigest()+'.json'
+        sdk_cache = Path(code_home)/'out/.sdk-inputs'/cache_name
+        options._sdk_identity, _ = hap_dependencies.sdk_inputs(options.sdk_home, sdk_cache)
+        previous = hap_dependencies.read_json(sdk_state)
+        options._sdk_changed = (previous.get('identity') != options._sdk_identity
+                                or previous.get('sdk') != sdk_location)
     
     if model_version:
         with open(os.path.join(code_home, "build/scripts/app_config.json"), 'r') as file:
@@ -534,14 +566,37 @@ def main(args):
     make_env(options.build_profile, cwd, options.ohpm_registry, options, hash_value, nodejs_home)
 
     # invoke hvigor to build hap or app
-    hvigor_build(cwd, options, hash_value, nodejs_home)
+    hvigor_command = hvigor_build(cwd, options, hash_value, nodejs_home)
 
     # strip rpcid.sc from unsigned haps
     strip_rpcid_from_haps(options.build_profile, cwd, options, hash_value)
 
     # generate a json file to record the path of all unsigned haps, and When signing hap later, 
     # this json file will serve as input to provide path information for each unsigned hap.
-    gen_unsigned_hap_path_json(options.build_profile, cwd, options, hash_value)
+    packages = gen_unsigned_hap_path_json(options.build_profile, cwd, options, hash_value,
+                                         write=not options.depfile)
+    if options.depfile:
+        final_identity, final_sdk_paths = hap_dependencies.sdk_inputs(options.sdk_home, sdk_cache)
+        if final_identity != options._sdk_identity:
+            raise RuntimeError('SDK changed during HAP compilation; refusing to seal stale output')
+        inputs = set(hap_dependencies.project_inputs(profile, cwd))
+        inputs.update(final_sdk_paths)
+        inputs.update(packages['unsigned_hap_path_list'])
+        inputs.update([options.build_profile, nodejs_home, __file__, hap_dependencies.__file__,
+                       os.path.join(code_home, 'build/scripts/app_config.json')])
+        if hvigor_command and len(hvigor_command) > 1:
+            inputs.add(os.path.join(cwd, hvigor_command[1]))
+        if options.system_lib_module_info_list:
+            inputs.update(options.system_lib_module_info_list)
+            for name in options.system_lib_module_info_list:
+                library = file_utils.read_json_file(name).get('source')
+                if library:
+                    inputs.add(library)
+        build_utils.write_depfile(options.depfile, options.output_file, sorted(inputs), relative_inputs=True)
+        hap_dependencies.write_json(sdk_state, {'identity': final_identity, 'sdk': sdk_location})
+        # Commit the existing completion output last, and advance it even when
+        # recovered HAP names are unchanged. No new empty stamp is introduced.
+        hap_dependencies.write_json(options.output_file, packages, force=True)
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv[1:]))

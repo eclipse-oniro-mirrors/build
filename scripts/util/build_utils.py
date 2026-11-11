@@ -610,11 +610,22 @@ def add_depfile_option(parser):
     func('--depfile', help='Path to depfile (refer to `gn help depfile`)')
 
 
-def write_depfile(depfile_path, first_gn_output, inputs=None, add_pydeps=True):
+def write_depfile(depfile_path, first_gn_output, inputs=None, add_pydeps=True,
+                  relative_inputs=False):
+    """Optionally rebase only inputs to the action cwd; keep the output spelling."""
     assert depfile_path != first_gn_output  # http://crbug.com/646165
     inputs = inputs or []
     if add_pydeps:
         inputs = _compute_python_dependencies() + inputs
+    if relative_inputs:
+        rebased = []
+        for path in inputs:
+            try:
+                rebased.append(os.path.relpath(path))
+            except ValueError:
+                # Windows paths on another drive have no relative spelling.
+                rebased.append(path)
+        inputs = rebased
     inputs = sorted(inputs)
     make_directory(os.path.dirname(depfile_path))
     # Ninja does not support multiple outputs in depfiles.
@@ -694,7 +705,8 @@ def call_and_write_depfile_if_stale(function,
                                     force=False,
                                     pass_changes=False,
                                     depfile_deps=None,
-                                    add_pydeps=True):
+                                    add_pydeps=True,
+                                    relative_inputs=False):
     """Wraps md5_check.call_and_record_if_stale() and writes a depfile if applicable.
 
     Depfiles are automatically added to output_paths when present in the
@@ -706,6 +718,9 @@ def call_and_write_depfile_if_stale(function,
     are already captured by GN deps since GN args can cause GN deps to change,
     and such changes are not immediately reflected in depfiles
     (http://crbug.com/589311).
+
+    relative_inputs opts the depfile into cwd-relative input paths without
+    changing the paths used by the action or its content-cache checks.
     """
     if not output_paths:
         raise Exception('At least one output_path must be specified.')
@@ -729,7 +744,8 @@ def call_and_write_depfile_if_stale(function,
             write_depfile(options.depfile,
                           output_paths[0],
                           all_depfile_deps,
-                          add_pydeps=False)
+                          add_pydeps=False,
+                          relative_inputs=relative_inputs)
 
     md5_check.call_and_record_if_stale(on_stale_md5,
                                        record_path=record_path,

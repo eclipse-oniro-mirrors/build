@@ -44,6 +44,7 @@ def parse_args(args):
     parser.add_argument('--certificate-file', help='')
     parser.add_argument('--hap-name', help='')
     parser.add_argument('--hap-list', help='')
+    parser.add_argument('--stamp', help='successful signing completion marker')
     options = parser.parse_args(args)
     return options
 
@@ -73,15 +74,21 @@ def sign_app(options, unsigned_hap_path: str, signed_hap_path: str):
 
 def main(args):
     options = parse_args(args)
+    dependencies = []
+    signed_outputs = []
     if not options.hap_out_dir:
         sign_app(options, options.inFile, options.outFile)
+        dependencies.append(options.inFile)
+        signed_outputs.append(options.outFile)
     else:
         if not os.path.exists(options.hap_out_dir):
             os.makedirs(options.hap_out_dir, exist_ok=True)
         unsigned_hap_path_list = file_utils.read_json_file(options.unsigned_hap_path_list)
+        dependencies.append(options.unsigned_hap_path_list)
         signed_hap_names = {}
         if os.path.isfile(options.hap_list):
             hap_list = file_utils.read_json_file(options.hap_list)
+            dependencies.append(options.hap_list)
             signed_hap_names['do_filter'] = hap_list.get('do_filter')
             for unsigned_to_signed in hap_list.get('hap_list'):
                 names = unsigned_to_signed.split(':')
@@ -106,6 +113,20 @@ def main(args):
                     output_hap_name = signed_hap_names.get(unsigned_hap_name)
             output_hap = os.path.join(options.hap_out_dir, output_hap_name)
             sign_app(options, unsigned_hap_path, output_hap)
+            dependencies.append(unsigned_hap_path)
+            signed_outputs.append(output_hap)
+
+    if options.stamp:
+        for output in signed_outputs:
+            if not os.path.isfile(output):
+                raise RuntimeError(f'Signer did not produce {output}')
+    if options.depfile:
+        build_utils.write_depfile(options.depfile, options.stamp or signed_outputs[0],
+                                 dependencies + signed_outputs, relative_inputs=True)
+    if options.stamp:
+        os.makedirs(os.path.dirname(os.path.abspath(options.stamp)), exist_ok=True)
+        with open(options.stamp, 'w', encoding='utf-8'):
+            pass
 
 
 if __name__ == '__main__':

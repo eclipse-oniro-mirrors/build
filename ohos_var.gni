@@ -15,6 +15,12 @@ import("//build/common.gni")
 import("//build/version.gni")
 
 declare_args() {
+  # Product opt-in for workspace baselines, relocation and build bwrap only.
+  # Ordinary Ninja dependency/output correctness fixes remain unconditional.
+  build_framework_enable_incremental_build = false
+}
+
+declare_args() {
   # test label
   test_label_type = ""
 }

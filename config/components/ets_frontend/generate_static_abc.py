@@ -512,6 +512,29 @@ def build_driver_config(args: argparse.Namespace) -> None:
         json.dump(config, f, indent=2, ensure_ascii=False)
 
 
+
+def prepare_stdlib_config(arktsconfig_path: str, cache_path: str) -> Optional[str]:
+    """Keep the simple stdlib path map immutable in the source tree.
+
+    Unknown schemas retain the existing configuration path. For the current
+    stdlib schema, absolute baseUrl preserves resolution in a per-target copy.
+    """
+    with open(arktsconfig_path) as source:
+        config = json.load(source)
+    options = config.get("compilerOptions", {})
+    if set(config) != {"compilerOptions"} or set(options) - {"baseUrl", "paths", "outDir", "rootDir"}:
+        return None
+    directory = os.path.dirname(os.path.abspath(arktsconfig_path))
+    options["baseUrl"] = os.path.abspath(os.path.join(directory, options.get("baseUrl", ".")))
+    if "rootDir" in options:
+        options["rootDir"] = os.path.abspath(os.path.join(directory, options["rootDir"]))
+    options["outDir"] = cache_path
+    prepared = os.path.join(cache_path, "stdlib-arktsconfig.json")
+    with open(prepared, "w", encoding="utf-8") as destination:
+        json.dump(config, destination, indent=2, ensure_ascii=False)
+    return prepared
+
+
 def handle_configuration(args: argparse.Namespace) -> None:
     """
     Handle the configuration setup based on command-line arguments.
@@ -521,7 +544,11 @@ def handle_configuration(args: argparse.Namespace) -> None:
     elif args.base_url:
         build_config(args)
     else:
-        modify_arktsconfig_with_cache(args.arktsconfig, args.cache_path)
+        prepared = prepare_stdlib_config(args.arktsconfig, args.cache_path) if args.is_stdlib else None
+        if prepared:
+            args.arktsconfig = prepared
+        else:
+            modify_arktsconfig_with_cache(args.arktsconfig, args.cache_path)
 
 
 def main() -> None:

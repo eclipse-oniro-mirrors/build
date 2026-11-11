@@ -173,7 +173,7 @@ def main():
 
     build_configs_file = os.path.join(args.output_dir,
                                       "subsystem_build_config.json")
-    write_json_file(build_configs_file, build_configs)
+    write_json_file(build_configs_file, build_configs, check_changes=True)
     return 0
 
 

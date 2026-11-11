@@ -52,7 +52,7 @@ def binary_install_subsystem(dist_parts_info_file: str,
 
 
 def output_installed_info(binary_subsystem_info: str, required_parts: list):
-    write_json_file(binary_subsystem_info, required_parts)
+    write_json_file(binary_subsystem_info, required_parts, check_changes=True)
 
 
 def main():
@@ -70,12 +70,19 @@ def main():
 
     if args.depfile:
         _dep_files = []
-        _dep_files.append(args.dist_parts_info_file)
+        # Missing binary-package metadata is explicitly supported above. Track
+        # its nearest existing parent so creating it still invalidates this
+        # action, without treating an absent optional file as perpetually dirty.
+        dist_dependency = os.path.abspath(args.dist_parts_info_file)
+        while not os.path.exists(dist_dependency):
+            dist_dependency = os.path.dirname(dist_dependency)
+        _dep_files.append(dist_dependency)
         _dep_files.append(args.parts_src_installed_info_file)
         build_utils.write_depfile(args.depfile,
                                  args.binary_installed_info_file,
                                  _dep_files,
-                                 add_pydeps=False)
+                                 add_pydeps=False,
+                                 relative_inputs=True)
     return 0
 
 

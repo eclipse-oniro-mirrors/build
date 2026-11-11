@@ -343,9 +343,12 @@ def main():
     if os.path.exists(args.system_image_zipfile):
         os.unlink(args.system_image_zipfile)
     build_utils.zip_dir(args.system_image_zipfile, args.system_dir)
-    depfiles.extend([item for item in depfiles if item not in sa_files])
+    # These files were extracted by this very action, not supplied as source
+    # inputs. Their source archive remains a dependency (also explicit in GN).
+    depfiles = [item for item in depfiles if item not in sa_files]
+    depfiles.append(args.merged_sa_profile)
     build_utils.write_depfile(args.depfile, args.install_modules_info_file,
-                              depfiles)
+                              depfiles, relative_inputs=True)
     
     BootPathCollection.run(args.system_dir)
     return 0
