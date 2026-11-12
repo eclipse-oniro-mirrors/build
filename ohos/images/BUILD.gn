@@ -319,7 +319,14 @@ foreach(_platform, target_platform_list) {
           "${base_dir}/mkcpioimage.py",
         ]
       }
-      outputs = [ output_image_file ]
+
+      # eng_chipset is optional: an absent input directory intentionally creates
+      # no image. Track successful handling separately rather than a fake image.
+      if (_image_name == "eng_chipset") {
+        outputs = [ "$target_out_dir/${target_name}.complete" ]
+      } else {
+        outputs = [ output_image_file ]
+      }
       args = [
         "--depfile",
         rebase_path(depfile, root_build_dir),
@@ -342,6 +349,12 @@ foreach(_platform, target_platform_list) {
       args += rebase_path(build_image_tools_path, root_build_dir)
       if (sparse_image) {
         args += [ "--sparse-image" ]
+      }
+      if (_image_name == "eng_chipset") {
+        args += [
+          "--output-stamp",
+          rebase_path(outputs[0], root_build_dir),
+        ]
       }
     }
   }
