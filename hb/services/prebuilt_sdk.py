@@ -50,18 +50,7 @@ class PrebuiltSdk(PrebuiltSdkInterface):
             return False
         sdk_path = os.path.join(self.sdk_prebuilts_path, 'linux', self.api_version)
         if os.path.exists(sdk_path):
-            # Explicitly shared/preinstalled packages are not source SDKs.
-            sdk_root = Path(self.sdk_prebuilts_path).resolve()
-            default_root = Path(CURRENT_OHOS_ROOT).resolve()/'prebuilts/ohos-sdk'
-            if sdk_root != default_root or not self._source_sdk_tools().dependencies.is_within(Path(sdk_path).resolve(), sdk_root):
-                return False
-            tools = self._source_sdk_tools()
-            if (self._reuse_source_sdk_configuration(args_dict)
-                    and not tools.state_path(CURRENT_OHOS_ROOT, self.api_version).exists()):
-                # An untracked package keeps the original existence-only policy.
-                # A normal build can establish source SDK provenance later.
-                return False
-            return tools.needs_build(CURRENT_OHOS_ROOT, self.api_version, self._source_sdk_context(args_dict))
+            return False
 
         return True
 
@@ -116,6 +105,8 @@ class PrebuiltSdk(PrebuiltSdkInterface):
 
     def run(self):
         """Implement ServiceInterface run method"""
+        if not self.should_build_sdk(self._args_dict):
+            return True
         tools = self._source_sdk_tools()
         with tools.dependencies.lock(str(tools.state_path(CURRENT_OHOS_ROOT, self.api_version))+'.lock'):
             if not self.should_build_sdk(self._args_dict):
