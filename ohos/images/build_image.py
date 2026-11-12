@@ -164,6 +164,8 @@ def main(argv):
     parser.set_defaults(sparse_image=False)
     parser.add_argument('--build-image-tools-path', nargs='*', required=False)
     parser.add_argument('--target-cpu', required=False)
+    parser.add_argument('--output-stamp', required=False,
+                        help='Completion output for an optional image')
     args = parser.parse_args(argv)
 
     if os.path.exists(args.output_image_path):
@@ -172,18 +174,43 @@ def main(argv):
         _prepare_userdata(args.input_path)
     elif args.image_name == 'eng_system':
         _prepare_eng_ststem(args.input_path, args.build_variant)
+    _dep_files = []
     if os.path.isdir(args.input_path):
         _make_image(args)
-        _dep_files = []
         for _root, _, _files in os.walk(args.input_path):
+            if args.output_stamp:
+                _dep_files.append(_root)
             for _file in _files:
                 _dep_files.append(os.path.join(_root, _file))
         if (os.path.exists(args.device_image_config_file)):
             _dep_files.append(args.device_image_config_file)
-        build_utils.write_depfile(args.depfile,
-                                  args.output_image_path,
-                                  _dep_files,
-                                  add_pydeps=False)
+        if not args.output_stamp:
+            build_utils.write_depfile(args.depfile,
+                                      args.output_image_path,
+                                      _dep_files,
+                                      add_pydeps=False)
+    if args.output_stamp:
+        # Directory entries detect newly installed files and the transition
+        # from an absent optional input to a real image. Track a present image
+        # too, so removing it schedules the original image generation again.
+        for path in (args.input_path, args.device_image_config_file):
+            parent = os.path.dirname(os.path.abspath(path))
+            while not os.path.isdir(parent):
+                parent = os.path.dirname(parent)
+            _dep_files.append(parent)
+        if os.path.isdir(args.input_path) and not os.path.isfile(args.output_image_path):
+            raise RuntimeError('Image generation completed without its output: ' +
+                               args.output_image_path)
+        if os.path.isfile(args.output_image_path):
+            _dep_files.append(args.output_image_path)
+        build_utils.write_depfile(args.depfile, args.output_stamp,
+                                  _dep_files, add_pydeps=False,
+                                  relative_inputs=True)
+        os.makedirs(os.path.dirname(os.path.abspath(args.output_stamp)),
+                    exist_ok=True)
+        with open(args.output_stamp, 'w', encoding='utf-8') as output:
+            output.write('image\n' if os.path.isfile(args.output_image_path)
+                         else 'no-input\n')
     return 0
 
 
