@@ -590,7 +590,7 @@ template("app_sign") {
       "--hap-name",
       hap_name,
     ]
-    if (_sign_hap_py_path == "//build/scripts/app_sign.py") {
+    if (!build_xts && _sign_hap_py_path == "//build/scripts/app_sign.py") {
       depfile = "${target_gen_dir}/${target_name}.d"
       args += [
         "--stamp",
