@@ -15,8 +15,9 @@ This tool never rewrites Ninja hashes/deps or pretends missing outputs exist.
 Transfer out/ with nanosecond mtimes, symlinks and both Ninja state files intact.
 """
 import argparse
+import base64
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from functools import partial
 import multiprocessing
 import threading
@@ -31,6 +32,7 @@ import sys
 import time
 import stat as stat_module
 import uuid
+import zlib
 
 LEGACY_MANIFEST = 'out/incremental_workspace.json'
 MANIFEST = LEGACY_MANIFEST
@@ -267,6 +269,7 @@ def refresh_unchanged_index(root, build, previous, cache):
     instance = instance_identity(root)
     if (not all(cache.get('instance', {}).get(key) == value for key, value in instance.items())
             or not cache.get('graph') or not cache.get('closure')
+            or cache.get('depfile_cache_format') != DEPFILE_CACHE_FORMAT
             or previous.get('depfile_inputs_version') != DEPFILE_INPUTS_VERSION):
         return False
     identity = graph_identity(build)
@@ -282,12 +285,19 @@ def refresh_unchanged_index(root, build, previous, cache):
         deps = build / '.ninja_deps'
         if (digest(deps) if deps.is_file() else None) != cache.get('deps_sha256'):
             return False
-        seen = set()
-        for path in depfile_inventory(build, cache.get('directories'), local=True):
+        seen, directories, changed_depfiles = set(), {}, {}
+        for path in depfile_inventory(build, cache.get('directories'), local=True,
+                                      directory_index=directories):
             name = str(path.relative_to(build))
             record = cache['depfiles'].get(name)
-            if record is None or file_signature(path.stat()) != record.get('stat'):
+            if record is None:
                 return False
+            signature = file_signature(path.stat())
+            if signature != record.get('stat'):
+                content, signature = stable_bytes(path)
+                if hashlib.sha256(content).hexdigest() != record['sha256']:
+                    return False
+                changed_depfiles[name] = {**record, 'stat': signature}
             seen.add(name)
         if seen != cache['depfiles'].keys():
             return False
@@ -305,6 +315,22 @@ def refresh_unchanged_index(root, build, previous, cache):
     except (FileNotFoundError, NotADirectoryError):
         return False
     previous = dict(previous)
+    directory_changes = any(record is not cache.get('directories', {}).get(name)
+                            for name, record in directories.items())
+    if changed_depfiles or directory_changes:
+        # Publish metadata only after every source, graph, dependency and tool
+        # check above succeeds. A crash between these two atomic replacements
+        # makes the old manifest reject the new generation and safely recapture.
+        cache = dict(cache, generation=uuid.uuid4().hex, directories=directories,
+                     depfiles={**cache['depfiles'], **changed_depfiles})
+        write_manifest(collection_cache_path(root, build), cache)
+        previous['collection_generation'] = cache['generation']
+        previous['collection_sha256'] = digest(collection_cache_path(root, build))
+        previous['retained_depfiles'] = dict(previous.get('retained_depfiles', {}))
+        for name, record in changed_depfiles.items():
+            if name in previous['retained_depfiles']:
+                previous['retained_depfiles'][name] = [record['stat'][2], record['stat'][3], record['sha256']]
+        phase(f'unchanged dependency metadata refreshed depfiles={len(changed_depfiles)}')
     previous['graph_identity'] = identity
     previous['origin_instance'] = instance
     args = (build / 'args.gn').read_text()
@@ -575,6 +601,7 @@ def depfile_rules(text):
 # The collection cache is optional acceleration, committed by generation only
 # after a successful complete product build. It never participates in restore.
 COLLECTION_VERSION = 2
+DEPFILE_CACHE_FORMAT = 1
 PARSED_DEPFILE_CACHE_BYTES = 64 * 1024 * 1024
 
 
@@ -936,9 +963,24 @@ def collect_retained_depfiles(build, paths, target, *, previous=None, local=Fals
     if inventory is None:
         inventory = scan_retained_depfiles(build, previous, local, directories, directory_index)
     parsed, producers = inventory
+    packed_bytes = sum(sys.getsizeof(record['packed_inputs']) for record in parsed.values()
+                       if record.get('packed_inputs') is not None)
     same_inventory = (closure is not None and closure.get('base') == base_digest
                       and parsed.keys() == old.keys()
                       and all(old[name]['sha256'] == record['sha256'] for name, record in parsed.items()))
+    if not same_inventory and closure is not None and closure.get('base') == base_digest:
+        # Changes outside the old reachable closure cannot affect it unless a
+        # new/changed producer now supplies a path in that closure.
+        retained_names = set(closure['retained'])
+        known_closure = known | {absolute(value) for value in closure['extra_inputs']}
+        same_inventory = (
+            retained_names.issubset(parsed)
+            and all(name in old and old[name]['sha256'] == parsed[name]['sha256']
+                    for name in retained_names)
+            and not any(absolute(output) in known_closure
+                        for name, record in parsed.items()
+                        if name not in old or old[name]['sha256'] != record['sha256']
+                        for output in record['outputs']))
     if same_inventory:
         paths.update(closure['extra_inputs'])
         for name in closure['retained']:
@@ -955,20 +997,30 @@ def collect_retained_depfiles(build, paths, target, *, previous=None, local=Fals
                 loaded.add(relative)
                 record = parsed[relative]
                 rules = record['rules']
-                if rules is None:
+                packed = record.get('packed_inputs')
+                if rules is None and packed is not None:
+                    inputs = zlib.decompress(base64.b64decode(packed)).decode('utf-8').split('\0') if packed else []
+                elif rules is None:
                     content, signature = stable_bytes(build / relative)
                     if signature != record['stat'] or hashlib.sha256(content).hexdigest() != record['sha256']:
                         raise RuntimeError(f'Depfile changed while collecting baseline: {relative}')
                     rules = list(depfile_rules(content.decode('utf-8', errors='replace')))
                     deferred += 1
-                for _, inputs in rules:
-                    new_inputs = set(inputs).difference(paths)
-                    paths.update(inputs)
-                    for value in new_inputs:
-                        resolved = absolute(value)
-                        if resolved not in known:
-                            known.add(resolved)
-                            pending.append(resolved)
+                    inputs = {value for _, values in rules for value in values}
+                    packed = pack_depfile_inputs(rules)
+                    size = sys.getsizeof(packed)
+                    if packed_bytes + size <= PARSED_DEPFILE_CACHE_BYTES:
+                        record['packed_inputs'] = packed
+                        packed_bytes += size
+                else:
+                    inputs = {value for _, values in rules for value in values}
+                new_inputs = set(inputs).difference(paths)
+                paths.update(inputs)
+                for value in new_inputs:
+                    resolved = absolute(value)
+                    if resolved not in known:
+                        known.add(resolved)
+                        pending.append(resolved)
                 signature = record['stat']
                 records[relative] = [signature[2], signature[3], record['sha256']]
     for name, record in parsed.items():
@@ -1002,6 +1054,14 @@ def parsed_rule_bytes(rules):
                 for words in rule) for rule in rules))
 
 
+def pack_depfile_inputs(rules):
+    """Keep dependency words compact without changing Make escaping semantics."""
+    inputs = sorted({value for _, values in rules for value in values})
+    if not inputs:
+        return ''
+    return base64.b64encode(zlib.compress('\0'.join(inputs).encode('utf-8'), 1)).decode('ascii')
+
+
 def scan_retained_depfiles(build, previous=None, local=False, directories=None, directory_index=None):
     """Read the complete depfile inventory independently of the Ninja input set."""
     started = time.perf_counter()
@@ -1013,11 +1073,15 @@ def scan_retained_depfiles(build, previous=None, local=False, directories=None, 
         record, cached = retained_depfile_record(path, old.get(relative), local)
         reused += cached
         if record['rules'] is not None:
-            size = parsed_rule_bytes(record['rules'])
-            if retained_bytes + size > PARSED_DEPFILE_CACHE_BYTES:
-                record['rules'] = None
-            else:
+            record['packed_inputs'] = pack_depfile_inputs(record['rules'])
+            record['rules'] = None
+        packed = record.get('packed_inputs')
+        if packed is not None:
+            size = sys.getsizeof(packed)
+            if retained_bytes + size <= PARSED_DEPFILE_CACHE_BYTES:
                 retained_bytes += size
+            else:
+                record.pop('packed_inputs', None)
         parsed[relative] = record
         for output in record['outputs']:
             absolute = os.path.normpath(os.path.join(build_base, output))
@@ -1125,6 +1189,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
             'depfile_inputs_version': DEPFILE_INPUTS_VERSION, 'retained_depfiles': retained}
     generation = uuid.uuid4().hex
     collection = {'version': COLLECTION_VERSION, 'generation': generation,
+                  'depfile_cache_format': DEPFILE_CACHE_FORMAT,
                   'canonical_root': str(root), 'build_dir': str(build.relative_to(root)),
                   'target': target, 'instance': local_collection_identity(root), 'graph': graph,
                   'ninja_sha256': digest(Path(ninja_command(root, build)[0])),
@@ -1133,6 +1198,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
                   'directories': directory_index, 'closure': closure_index}
     cache_started = time.perf_counter()
     unchanged_index = (local and same_graph and same_deps
+                       and cache.get('depfile_cache_format') == DEPFILE_CACHE_FORMAT
                        and cache.get('directories', {}).keys() == directory_index.keys()
                        and all(not entry.get('timestamp_stable')
                                or cache['directories'][name].get('timestamp_stable')
@@ -1160,6 +1226,143 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
     phase('baseline capture complete', started)
 
 
+_RESTORE_RESOLUTIONS = None
+RESTORE_BATCH_SIZE = 256
+RESTORE_PARALLEL_MIN_INPUTS = 4096
+
+
+def restore_worker_count():
+    available = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
+    limits = []
+    try:
+        memberships = Path('/proc/self/cgroup').read_text().splitlines()
+    except OSError:
+        memberships = []
+    for line in memberships:
+        _, controllers, relative = line.split(':', 2)
+        bases = ([Path('/sys/fs/cgroup')] if not controllers else
+                 [Path('/sys/fs/cgroup/cpu'), Path('/sys/fs/cgroup/cpu,cpuacct')]
+                 if 'cpu' in controllers.split(',') else [])
+        for base in bases:
+            current = base / relative.lstrip('/')
+            if not current.is_dir():
+                current = base
+            while current.is_relative_to(base):
+                try:
+                    if not controllers:
+                        quota, period = (current / 'cpu.max').read_text().split()
+                    else:
+                        quota = (current / 'cpu.cfs_quota_us').read_text().strip()
+                        period = (current / 'cpu.cfs_period_us').read_text().strip()
+                    if quota != 'max' and int(quota) > 0 and int(period) > 0:
+                        limits.append(max(1, int(quota) // int(period)))
+                except (OSError, ValueError):
+                    pass
+                if current == base:
+                    break
+                current = current.parent
+    requested = int(os.environ.get('OHOS_INCREMENTAL_RESTORE_JOBS', '8'))
+    if not 1 <= requested <= 32:
+        raise ValueError('OHOS_INCREMENTAL_RESTORE_JOBS must be between 1 and 32')
+    return min(requested, available, *limits) if limits else min(requested, available)
+
+
+def restore_read_batch(root_name, names):
+    global _RESTORE_RESOLUTIONS
+    if _RESTORE_RESOLUTIONS is None:
+        _RESTORE_RESOLUTIONS = {}
+    cache = _RESTORE_RESOLUTIONS
+    root = Path(root_name)
+    resolved_root = resolve_cached_string(root, cache)
+    prefix = resolved_root.rstrip(os.sep) + os.sep
+    results = []
+    for name in names:
+        path = root / name
+        if Path(name).is_absolute() or '..' in Path(name).parts or path.is_symlink():
+            raise ValueError(f'Invalid source input: {name}')
+        resolved = os.path.join(resolve_cached_string(path.parent, cache), path.name)
+        if resolved != resolved_root and not resolved.startswith(prefix):
+            raise ValueError(f'Invalid source input: {name}')
+        try:
+            before = path.stat()
+        except FileNotFoundError:
+            results.append((name, None, None, None))
+            continue
+        directory = stat_module.S_ISDIR(before.st_mode)
+        fingerprint = directory_digest(path) if directory else digest(path)
+        after = path.stat()
+        if file_signature(before) != file_signature(after):
+            raise RuntimeError(f'Input changed while restoring: {name}; retry the build')
+        results.append((name, directory, fingerprint, file_signature(after)))
+    return results
+
+
+def restore_parallel(root, data, workers, verified, started):
+    counts = {'restored': 0, 'changed': 0, 'missing': 0}
+    names = iter(data['files'])
+    processed = 0
+    next_report = started + 2
+    phase(f'input restore executor=process workers={workers} files_per_shard={RESTORE_BATCH_SIZE}')
+    def next_batch():
+        batch = []
+        for _ in range(RESTORE_BATCH_SIZE):
+            name = next(names, None)
+            if name is None:
+                break
+            batch.append(name)
+        return batch
+    with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn')) as pool:
+        pending = set()
+        for _ in range(2 * workers):
+            batch = next_batch()
+            if batch:
+                pending.add(pool.submit(restore_read_batch, str(root), batch))
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                results = future.result()
+                batch = next_batch()
+                if batch:
+                    pending.add(pool.submit(restore_read_batch, str(root), batch))
+                for name, directory, fingerprint, signature in results:
+                    path = root / name
+                    if signature is None:
+                        counts['missing'] += 1
+                        processed += 1
+                        continue
+                    # A previous alias may have updated this inode's mtime.
+                    # Revalidate instead of applying a stale worker result.
+                    if file_signature(path.lstat()) != signature:
+                        _, directory, fingerprint, signature = restore_read_batch(str(root), [name])[0]
+                        if signature is None:
+                            counts['missing'] += 1
+                            processed += 1
+                            continue
+                    record = data['files'][name]
+                    executable = bool(signature[5] & 0o111)
+                    if (directory != (record.get('kind') == 'directory')
+                            or fingerprint != record['sha256']
+                            or executable != record.get('executable', executable)):
+                        if data.get('mtime_ceiling_ns', 0) >= time.time_ns():
+                            raise RuntimeError('Snapshot outputs are newer than the host clock; synchronize clocks before restoring changed inputs')
+                        os.utime(path, None, follow_symlinks=False)
+                        counts['changed'] += 1
+                    elif signature[3] != record['mtime_ns']:
+                        os.utime(path, ns=(path.stat().st_atime_ns, record['mtime_ns']), follow_symlinks=False)
+                        counts['restored'] += 1
+                    current = path.stat()
+                    if verified is not None and [current.st_dev, current.st_ino, current.st_size, current.st_mode] == [signature[i] for i in (0, 1, 2, 5)]:
+                        verified[name] = {'sha256': fingerprint, 'kind': 'directory' if directory else 'file',
+                                          'mtime_ns': current.st_mtime_ns, 'executable': bool(current.st_mode & 0o111),
+                                          'stat': file_signature(current)}
+                    processed += 1
+                if time.perf_counter() >= next_report:
+                    phase(f'input restore progress={processed}/{len(data["files"])}', started)
+                    next_report = time.perf_counter() + 2
+    print(json.dumps(counts))
+    phase(f'input restore complete inputs={len(data["files"])}', started)
+
+
 def restore(root, data, *, tools_validated=False, verified=None):
     canonical = Path(data['canonical_root']) if 'canonical_root' in data else root
     if root != canonical:
@@ -1170,13 +1373,21 @@ def restore(root, data, *, tools_validated=False, verified=None):
     started = time.perf_counter()
     total = len(data['files'])
     phase(f'restoring transferred inputs total={total}')
+    workers = restore_worker_count()
+    if total >= RESTORE_PARALLEL_MIN_INPUTS and workers > 1 and sys.platform.startswith('linux'):
+        return restore_parallel(root, data, workers, verified, started)
     next_report = started + 2
     counts = {'restored': 0, 'changed': 0, 'missing': 0}
+    resolutions = {}
+    resolved_root = resolve_cached_string(root, resolutions)
+    root_prefix = resolved_root.rstrip(os.sep) + os.sep
     for processed, (name, record) in enumerate(data['files'].items(), 1):
         path = root / name
         # Reject traversal even for manifests provided with external snapshots.
-        if (Path(name).is_absolute() or '..' in Path(name).parts or path.is_symlink()
-                or not path.resolve().is_relative_to(root.resolve())):
+        if Path(name).is_absolute() or '..' in Path(name).parts or path.is_symlink():
+            raise ValueError(f'Invalid source input: {name}')
+        resolved = os.path.join(resolve_cached_string(path.parent, resolutions), path.name)
+        if resolved != resolved_root and not resolved.startswith(root_prefix):
             raise ValueError(f'Invalid source input: {name}')
         is_directory = record.get('kind') == 'directory'
         if not path.exists():
