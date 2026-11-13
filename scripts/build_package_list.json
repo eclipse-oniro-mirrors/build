@@ -54,6 +54,7 @@
         "mtools",
         "mtd-utils",
         "scons",
+	"gcc-arm-linux-gnueabi",
         "gcc-arm-none-eabi"
     ]}
     ,
