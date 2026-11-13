@@ -218,7 +218,66 @@ template("ohos_copy") {
       }
     }
   } else {
-    copy(target_name) {
+    _copy_type = "copy"
+    _stable_directory_copy =
+        defined(invoker.stable_directory_copy) && invoker.stable_directory_copy
+    if (_stable_directory_copy) {
+      _copy_type = "action"
+      _payload_target = "${_main_target_name}__directory_payload"
+      _payload_state =
+          get_label_info(":${_main_target_name}", "target_out_dir") +
+          "/${_main_target_name}.copy.json"
+      action(_payload_target) {
+        forward_variables_from(invoker, [ "testonly" ])
+        script = "//build/scripts/copy_directory_outputs.py"
+        sources = invoker.sources
+        deps = _deps
+        outputs =
+            [
+              "$target_out_dir/${_main_target_name}.copy.payload.complete",
+              _payload_state,
+            ] + process_file_template(invoker.sources, invoker.outputs)
+        depfile = "$target_gen_dir/${_main_target_name}.copy.d"
+        args = [
+          "--declare-roots",
+          "--stamp",
+          rebase_path(outputs[0], root_build_dir),
+          "--state",
+          rebase_path(_payload_state, root_build_dir),
+          "--depfile",
+          rebase_path(depfile, root_build_dir),
+        ]
+        if (defined(invoker.stable_directory_copy_preserve)) {
+          foreach(_preserved, invoker.stable_directory_copy_preserve) {
+            args += [
+              "--preserve",
+              rebase_path(_preserved, root_build_dir),
+            ]
+          }
+        }
+        if (defined(invoker.stable_directory_copy_caches)) {
+          foreach(_cache, invoker.stable_directory_copy_caches) {
+            args += [
+              "--discard-cache",
+              rebase_path(_cache, root_build_dir),
+            ]
+          }
+        }
+        foreach(_source, invoker.sources) {
+          _destinations = []
+          _destinations = process_file_template([ _source ], invoker.outputs)
+          assert(_destinations != [])
+          foreach(_destination, _destinations) {
+            args += [
+              "--pair",
+              rebase_path(_source, root_build_dir),
+              rebase_path(_destination, root_build_dir),
+            ]
+          }
+        }
+      }
+    }
+    target(_copy_type, target_name) {
       forward_variables_from(invoker,
                              [
                                "testonly",
@@ -227,13 +286,34 @@ template("ohos_copy") {
                                "external_deps",
                                "public_external_deps",
                                "public_configs",
-                               "sources",
-                               "outputs",
                                "module_type",
                                "copy_linkable_file",
                                "rust_crate_name",
                                "rust_crate_type",
                              ])
+      if (_stable_directory_copy) {
+        script = "//build/scripts/copy_directory_outputs.py"
+        inputs = [ _payload_state ]
+        outputs = [ "$target_out_dir/${target_name}.copy.complete" ]
+        args = [
+          "--publish-state",
+          rebase_path(_payload_state, root_build_dir),
+          rebase_path(outputs[0], root_build_dir),
+        ]
+        if (defined(public_deps)) {
+          public_deps += [ ":${_payload_target}" ]
+        } else {
+          public_deps = [ ":${_payload_target}" ]
+        }
+      } else {
+        sources = invoker.sources
+        outputs = invoker.outputs
+        not_needed(invoker,
+                   [
+                     "stable_directory_copy_preserve",
+                     "stable_directory_copy_caches",
+                   ])
+      }
       deps = _deps
 
       if (defined(visibility) && visibility != []) {

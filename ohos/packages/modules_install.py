@@ -232,6 +232,7 @@ def main():
     parser.add_argument('--sa-profile-extract-dir', required=True)
     parser.add_argument('--merged-sa-profile', required=True)
     parser.add_argument('--depfile', required=True)
+    parser.add_argument('--completion-stamp')
     parser.add_argument('--system-image-zipfile', required=True)
     parser.add_argument('--host-toolchain', required=True)
     parser.add_argument('--is-host-product', required=False, default='False')
@@ -347,10 +348,20 @@ def main():
     # inputs. Their source archive remains a dependency (also explicit in GN).
     depfiles = [item for item in depfiles if item not in sa_files]
     depfiles.append(args.merged_sa_profile)
+    if args.completion_stamp:
+        # These configuration files can change optional module selection or
+        # installation paths even when the module binaries are unchanged.
+        depfiles.append(args.arm64e_whitelist_file)
+        if args.categorized_libraries:
+            depfiles.append(args.categorized_libraries)
+        if os.path.isfile(args.arm64e_modules_info_file):
+            depfiles.append(args.arm64e_modules_info_file)
     build_utils.write_depfile(args.depfile, args.install_modules_info_file,
                               depfiles, relative_inputs=True)
     
     BootPathCollection.run(args.system_dir)
+    if args.completion_stamp:
+        build_utils.touch(args.completion_stamp)
     return 0
 
 

@@ -97,8 +97,6 @@ else
   unset OHOS_INCREMENTAL_BUILD_TIME OHOS_INCREMENTAL_BUILD_DATETIME
 fi
 
-incremental_original_args=("$@")
-
 if [[ "${SOURCE_ROOT_DIR}x" == "x" ]]; then
   echo -e "\033[31m[OHOS ERROR] SOURCE_ROOT_DIR cannot be empty.\033[0m"
   exit 1
@@ -177,7 +175,7 @@ npm config set strict-ssl false
 npm config set lockfile false
 cat $HOME/.npmrc | grep 'lockfile=false' > /dev/null || echo 'lockfile=false' >> $HOME/.npmrc > /dev/null
 
-function init_ohpm() {
+function init_ohpm_tools() {
   TOOLS_INSTALL_DIR="${SOURCE_ROOT_DIR}/prebuilts/build-tools/common"
   pushd ${TOOLS_INSTALL_DIR} > /dev/null
     OHPM_HOME=${TOOLS_INSTALL_DIR}/../../tool/command-line-tools/ohpm/bin
@@ -190,6 +188,9 @@ function init_ohpm() {
     ohpm config set strict_ssl false
     ohpm config set log_level debug
   popd > /dev/null
+}
+
+function init_ohpm_packages() {
   if [[ -d "$HOME/.hvigor" ]]; then
     rm -rf $HOME/.hvigor/daemon $HOME/.hvigor/wrapper
   fi
@@ -215,9 +216,55 @@ function init_ohpm() {
   popd > /dev/null
 }
 
+function init_ohpm() {
+  init_ohpm_tools
+  init_ohpm_packages
+}
+
+function init_ohpm_cached() {
+  # Keep the same command lookup on both cache hits and fresh initialization.
+  OHPM_HOME="${SOURCE_ROOT_DIR}/prebuilts/tool/command-line-tools/ohpm/bin"
+  export PATH="${OHPM_HOME}:$PATH"
+  local cache_helper="${SOURCE_ROOT_DIR}/build/scripts/ohpm_init_cache.py"
+  if "${PYTHON3}" "$cache_helper" check "${SOURCE_ROOT_DIR}"; then
+    # Preserve the existing daemon reset; only reuse the installed packages.
+    rm -rf "$HOME/.hvigor/daemon" || return 1
+    echo "[OHOS INFO] Reusing verified ohpm/pnpm/hypium initialization"
+    return 0
+  fi
+  # A failed refresh must not leave an older successful cache usable.
+  rm -f "$HOME/.ohpm/.openharmony-init-cache.json" || return 1
+  # Reapply the original ohpm setup/configuration before trusting a moved
+  # snapshot. This retains the existing ohpm configuration commands and does
+  # not install pnpm/hypium or import configuration from another server.
+  (set -e; init_ohpm_tools)
+  local init_result=$?
+  if [[ "$init_result" -ne 0 ]]; then
+    return "$init_result"
+  fi
+  if "${PYTHON3}" "$cache_helper" restore "${SOURCE_ROOT_DIR}"; then
+    rm -rf "$HOME/.hvigor/daemon" || return 1
+    echo "[OHOS INFO] Reusing verified workspace ohpm/pnpm/hypium packages"
+    return 0
+  fi
+  # No compatible snapshot: retain the original installer and its versions.
+  (set -e; init_ohpm_packages)
+  init_result=$?
+  if [[ "$init_result" -ne 0 ]]; then
+    return "$init_result"
+  fi
+  if ! "${PYTHON3}" "$cache_helper" record "${SOURCE_ROOT_DIR}"; then
+    echo "[OHOS WARNING] Initialization cache unavailable; next build will initialize again"
+  fi
+}
+
 if [[ "$*" != *ohos-sdk* ]]; then
   echo "[OHOS INFO] Ohpm initialization started..."
-  init_ohpm
+  if [[ "$incremental_workspace_enabled" == 1 ]]; then
+    init_ohpm_cached
+  else
+    init_ohpm
+  fi
   if [[ "$?" -ne 0 ]]; then
     echo -e "\033[31m[OHOS ERROR] ohpm initialization failed!\033[0m"
     exit 1
@@ -269,14 +316,6 @@ fi
 if [[ "$?" -ne 0 ]]; then
     echo -e "\033[31m=====build ${product_name} error=====\033[0m"
     exit 1
-fi
-if [[ "$incremental_workspace_enabled" == 1 ]]; then
-  python3 "${SOURCE_ROOT_DIR}/build/scripts/incremental_workspace.py" \
-    --root "${SOURCE_ROOT_DIR}" finish -- "${incremental_original_args[@]}"
-  if [[ "$?" -ne 0 ]]; then
-    echo "[OHOS ERROR] Build completed but recording the relocatable baseline failed."
-    exit 1
-  fi
 fi
 echo -e "\033[32m=====build ${product_name} successful=====\033[0m"
 

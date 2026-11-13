@@ -1,5 +1,61 @@
 # Incremental builds after workspace relocation
 
+## Reusing ohpm initialization
+
+Products with `build_framework_enable_incremental_build` enabled reuse verified
+pnpm/hypium installations. Other products retain the original initializer, and
+the SDK entry still skips initialization. Package versions, the entry script's
+Node 14 requirement, registry settings and hvigor daemon reset are unchanged.
+
+The local check at `$HOME/.ohpm/.openharmony-init-cache.json` uses version 2.
+It validates package versions, files, permissions and relative symlinks. Within
+the same boot, workspace and HOME, unchanged inode/ctime/mtime metadata reuses
+file hashes. A copied or renamed workspace/HOME rehashes contents before reuse;
+host file identities are never treated as portable proof. Normal source edits
+and unrelated PATH entries do not invalidate an unchanged tool installation.
+The selected node, npm and ohpm files, initialization scripts, host platform,
+architecture/libc and configuration still have to match. npm must resolve to a
+recognized npm package entry; unsupported wrapper layouts use the original
+initializer instead of scanning the executable's arbitrary ancestor directory.
+Custom NODE_PATH or Node module injection options also use the original path.
+
+After successful initialization, a content-verified package snapshot is saved
+under `out/.incremental/ohpm-init/`. This directory travels with the existing
+source-and-out transfer; no extra command or fixed server path is required.
+The snapshot covers the two pinned pnpm node_modules trees and the hypium
+module tree. Its manifest uses logical names and content hashes, not the
+origin's device, inode, ctime, checkout path or HOME. Identical package payloads
+reuse one compressed archive. User npmrc/ohpmrc files, credentials, daemon data
+and arbitrary HOME contents are not imported into the snapshot.
+
+On another server, even with an empty HOME, the entry script first performs
+its original lightweight ohpm setup/configuration. If the transferred snapshot
+matches the current tools and configuration, it verifies the archive and
+restores missing package trees into the current HOME. File bytes, executable
+permissions and internal relative links are preserved. Existing installations
+with different contents are not overwritten by snapshot restoration. Bad hashes,
+unsafe paths/links, incompatible tools, missing snapshots or changed configuration
+fall back to the original installation commands. Failure does not publish a
+successful local cache. Concurrent initializations modifying the same physical
+HOME remain unsupported, as with the original initializer.
+
+Installed package files are kept byte-for-byte, including npm's informational
+`_where` metadata when present; the cache does not use that field to locate tools.
+Runtime validation hides the origin directories and uses the destination paths.
+This snapshot optimizes initialization only. It is not a complete offline HAP
+build environment, does not rewrite existing Ninja HOME paths and does not
+replace the product's baseline/relocation checks. Copying an old v1 cache alone
+cannot recreate missing packages: prepare one successful v2 initialization
+before exporting the workspace.
+
+Removing the local cache forces verification/restoration from the workspace
+snapshot; removing both caches forces the original initialization. To run the
+offline regression suite with isolated temporary HOME directories:
+
+```bash
+python3 build/test/test_ohpm_init_cache.py -v
+```
+
 The supported workflow transfers the complete source workspace together with
 its out/ directory, then runs the existing build command:
 
@@ -23,8 +79,12 @@ entry script first reads the product feature. Only enabled products check their
 actual output folder/incremental_workspace.json (see Product opt-in below). A successful explicit
 make_all records source input digests, nanosecond timestamps, executable bits,
 tool identities, the original logical root and build time. Unchanged builds
-refresh that record without collecting all Ninja inputs again. The trailing
-`incremental workspace:` messages report this bookkeeping. Single-target
+refresh that record without collecting all Ninja inputs again. HB waits for the
+baseline subprocess immediately after successful target compilation and before
+post-target OSKM/LSP collection. The baseline does not require LSP to run, and a
+failed baseline seal fails the build instead of leaving background work after
+the entry script exits. The `incremental workspace:` messages report this
+bookkeeping. Single-target
 builds retain their requested targets and do not replace the full baseline.
 
 Successful full-product seals also atomically acknowledge the exact manifest
@@ -153,6 +213,21 @@ missing output. Changed graphs, dependencies or inputs use the indexed collector
 Across copies or hosts, entry-verified fingerprints are valid only for the same
 build invocation; subsequent changes still require hashing. Journals are removed
 after finishing, and each product uses its actual output directory.
+
+Directory checks run in bounded thread batches. Dependency database records that
+only change output timestamps reuse their dependency paths after checking the
+database's content identity. This keeps ordinary source-only edits from requiring
+another complete Ninja dependency query.
+
+When dependency membership changes, an optional compressed active-output index
+can reconstruct dependency paths from the current database. The index is bound
+to the complete graph, Ninja executable and local filesystem instance. It is
+created from Ninja's own output query; new unknown outputs, changed contexts,
+invalid records or an unusable index fall back to Ninja's dependency query.
+The database is checked again before publication. A transferred index does not
+use the previous host's metadata as evidence of unchanged contents. Creating the
+index has a one-time cost; this optimization does not guarantee shorter time
+for every workload.
 
 This bookkeeping does not rewrite compiler/linker commands, skip Ninja, fabricate
 outputs or change device payloads. Disabled products do not enter this path.

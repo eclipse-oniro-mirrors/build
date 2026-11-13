@@ -78,7 +78,7 @@ def main():
     depfiles = [args.system_installed_info_file]
     install_moudle_dict = read_install_info(args.system_installed_info_file,
                                             depfiles)
-    write_json_file(args.required_install_modules_file, install_moudle_dict)
+    write_json_file(args.required_install_modules_file, install_moudle_dict, check_changes=True)
     build_utils.write_depfile(args.depfile, args.required_install_modules_file,
                               depfiles)
     return 0

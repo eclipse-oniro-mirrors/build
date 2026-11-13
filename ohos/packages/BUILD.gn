@@ -313,6 +313,15 @@ foreach(_platform, target_platform_list) {
       system_modules_list,
       _system_image_zipfile,
     ]
+    _use_install_completion =
+        build_framework_enable_incremental_build && !build_xts
+    if (_use_install_completion) {
+      # The arm64e list exists only when matching modules were installed.
+      # Mandatory outputs remain explicit; an existing optional list is
+      # tracked by the install action's depfile.
+      outputs -= [ system_arm64e_modules_info ]
+      outputs += [ "$target_out_dir/${target_name}.complete" ]
+    }
 
     _is_host_product_arg = "false"
     if (is_host_product) {
@@ -349,6 +358,12 @@ foreach(_platform, target_platform_list) {
       "--is-host-product",
       _is_host_product_arg,
     ]
+    if (_use_install_completion) {
+      args += [
+        "--completion-stamp",
+        rebase_path("$target_out_dir/${target_name}.complete", root_build_dir),
+      ]
+    }
 
     _additional_system_files = []
     foreach(tuple, _additional_system_files) {
