@@ -18,6 +18,7 @@
         "unzip",
         "scons",
         "gcc-arm-none-eabi",
+	"gcc-arm-linux-gnueabi",
         "liblz4-tool"
     ]},
     "20.04":{
@@ -35,6 +36,7 @@
         "mtools",
         "mtd-utils",
         "scons",
+	"gcc-arm-linux-gnueabi",
         "gcc-arm-none-eabi"
     ]},
     "22.04":{
