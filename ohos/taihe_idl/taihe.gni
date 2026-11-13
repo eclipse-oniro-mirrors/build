@@ -38,6 +38,7 @@ template("ohos_taihe") {
                  "external_deps",
                  "module_prefix",
                  "path_prefix",
+                 "use_ats",
                ])
     action(target_name) {
       script = rebase_path("//build/scripts/touch_outputs.py")
@@ -85,6 +86,10 @@ template("ohos_taihe") {
         "-G",
         "ani-bridge",
       ]
+
+      if (defined(invoker.use_ats) && invoker.use_ats) {
+        args += [ "-Carkts:use-ats-extension" ]
+      }
 
       if (!defined(invoker.enable_exceptions) || !invoker.enable_exceptions) {
         args += [ "-Cnoexcept-all" ]
