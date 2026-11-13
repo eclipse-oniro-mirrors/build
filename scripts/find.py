@@ -39,7 +39,7 @@ def main(argv):
             else:
                 if fnmatch.filter(d, options.pattern):
                     print(d)
-            return 0
+            continue
         elif not os.path.isdir(d):
             # if input path is not a directory nor a normal file, return error.
             print('%s is not a directory or a file' % d)

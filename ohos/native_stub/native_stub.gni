@@ -301,15 +301,13 @@ template("ohos_native_stub_headers") {
     script = "//build/ohos/ndk/check_ndk_header_signature.py"
     depfile = "${target_gen_dir}/${target_name}.d"
 
-    inputs = []
+    _rebased_find_sources = []
     foreach(src, invoker.sources) {
-      _all_files = []
-      _all_files = exec_script("//build/scripts/find.py",
-                               [ rebase_path(src) ],
-                               "list lines")
-
-      inputs += _all_files
+      _rebased_find_sources += [ rebase_path(src) ]
     }
+    inputs = exec_script("//build/scripts/find.py",
+                         _rebased_find_sources,
+                         "list lines")
 
     _output = "$target_gen_dir/$target_name.stamp"
 
