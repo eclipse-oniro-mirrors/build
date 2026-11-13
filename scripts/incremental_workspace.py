@@ -28,6 +28,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import struct
 import sys
 import time
 import stat as stat_module
@@ -42,6 +43,8 @@ DEPFILE_INPUTS_VERSION = 1
 ACTIVE_POLICY = None
 ACTIVE_ROOT = None
 FINGERPRINT_BATCH_SIZE = 128
+DIRECTORY_PARALLEL_MIN = 8192
+NINJA_DEPS_INDEX_LIMIT = 32 * 1024 * 1024
 
 
 def request_build_dir(root, request):
@@ -269,6 +272,7 @@ def refresh_unchanged_index(root, build, previous, cache):
     instance = instance_identity(root)
     if (not all(cache.get('instance', {}).get(key) == value for key, value in instance.items())
             or not cache.get('graph') or not cache.get('closure')
+            or 'deps_content_sha256' not in cache
             or cache.get('depfile_cache_format') != DEPFILE_CACHE_FORMAT
             or previous.get('depfile_inputs_version') != DEPFILE_INPUTS_VERSION):
         return False
@@ -283,8 +287,10 @@ def refresh_unchanged_index(root, build, previous, cache):
             if file_signature(os.stat(os.path.join(build, name))) != record.get('stat'):
                 return False
         deps = build / '.ninja_deps'
-        if (digest(deps) if deps.is_file() else None) != cache.get('deps_sha256'):
+        deps_signature = ninja_deps_signature(build)
+        if (digest(deps) if deps_signature is not None else None) != cache.get('deps_sha256'):
             return False
+        check_ninja_deps_snapshot(build, deps_signature, cache.get("deps_sha256"))
         seen, directories, changed_depfiles = set(), {}, {}
         for path in depfile_inventory(build, cache.get('directories'), local=True,
                                       directory_index=directories):
@@ -314,6 +320,7 @@ def refresh_unchanged_index(root, build, previous, cache):
             return False
     except (FileNotFoundError, NotADirectoryError):
         return False
+    check_ninja_deps_snapshot(build, deps_signature, cache.get("deps_sha256"))
     previous = dict(previous)
     directory_changes = any(record is not cache.get('directories', {}).get(name)
                             for name, record in directories.items())
@@ -348,6 +355,7 @@ def refresh_unchanged_index(root, build, previous, cache):
             if len(fields) >= 3 and fields[2].isdigit():
                 ceiling = max(ceiling, int(fields[2]))
     previous['mtime_ceiling_ns'] = ceiling
+    check_ninja_deps_snapshot(build, deps_signature, cache.get("deps_sha256"))
     write_manifest(root / MANIFEST, previous)
     return True
 
@@ -692,25 +700,28 @@ def graph_content_records(root, build, previous, local):
     GN emits literal includes. Arbitrary Ninja variable expansion is deliberately
     not approximated: Ninja itself will rediscover inputs on that fallback path.
     """
-    records, pending = {}, [build / 'build.ninja']
+    build_base = os.path.abspath(build)
+    records, pending = {}, [os.path.join(build_base, 'build.ninja')]
     resolutions = {}
-    resolved_root = resolve_cached(root, resolutions)
+    resolved_root = resolve_cached_string(root, resolutions)
+    root_prefix = resolved_root.rstrip(os.sep) + os.sep
     progress = time.perf_counter() + 2
     old = previous or {}
     include = re.compile(rb'(?m)^(?:include|subninja)[ \t]+([^\r\n]+)')
     while pending:
         path = pending.pop()
-        relative = os.path.relpath(path, build)
+        relative = os.path.relpath(path, build_base)
         if relative in records:
             continue
-        if not resolve_cached(path, resolutions).is_relative_to(resolved_root):
+        resolved = resolve_cached_string(path, resolutions)
+        if resolved != resolved_root and not resolved.startswith(root_prefix):
             return None
-        signature = file_signature(path.stat())
+        signature = file_signature(os.stat(path))
         cached = old.get(relative)
         if local and cached and cached.get('stat') == signature:
             record = cached
         else:
-            content, signature = stable_bytes(path)
+            content, signature = stable_bytes(Path(path))
             children = []
             for match in include.finditer(content):
                 value = match[1].decode().strip()
@@ -724,7 +735,7 @@ def graph_content_records(root, build, previous, local):
             record = {'sha256': hashlib.sha256(content).hexdigest(),
                       'stat': signature, 'includes': children}
         records[relative] = record
-        pending.extend(Path(os.path.abspath(build / value)) for value in record['includes'])
+        pending.extend(os.path.abspath(os.path.join(build_base, value)) for value in record['includes'])
         if time.perf_counter() >= progress:
             phase(f'complete Ninja graph progress files={len(records)}')
             progress = time.perf_counter() + 2
@@ -736,19 +747,23 @@ def same_graph_content(old, new):
             and all(old[name]['sha256'] == record['sha256'] for name, record in new.items()))
 
 
-def collect_ninja_paths(root, build, tool, target='make_all'):
+def collect_ninja_paths(root, build, tool, target='make_all', *, deps_metadata=None):
     started = time.perf_counter()
     phase(f'collecting Ninja {tool}')
-    paths = set()
-    command = ninja_command(root, build, '-n', '-t', tool,
-                            *(['-E', target] if tool == 'inputs' else []))
-    with subprocess.Popen(command, text=True, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL) as process:
-        for line in process.stdout:
-            if tool != 'deps' or line.startswith('    '):
-                paths.add(line.strip())
-        if process.wait():
-            raise RuntimeError(f'ninja -t {tool} failed')
+    if tool == 'deps' and deps_metadata is not None:
+        paths, live = collect_ninja_deps_with_outputs(root, build)
+        deps_metadata['live_outputs'] = live
+    else:
+        paths = set()
+        command = ninja_command(root, build, '-n', '-t', tool,
+                                *(['-E', target] if tool == 'inputs' else []))
+        with subprocess.Popen(command, text=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL) as process:
+            for line in process.stdout:
+                if tool != 'deps' or line.startswith('    '):
+                    paths.add(line.strip())
+            if process.wait():
+                raise RuntimeError(f'ninja -t {tool} failed')
     phase(f'Ninja {tool} collected unique_paths={len(paths)}', started)
     return paths
 
@@ -783,12 +798,23 @@ def fingerprint_record(item):
 
 def normalize_input_paths(context):
     root_base, build_base, values = context
-    candidates, resolutions = {}, {}
+    candidates, resolutions, parents = {}, {}, {}
     prefix = root_base.rstrip(os.sep) + os.sep
     for value in values:
-        lexical = os.path.abspath(os.path.join(build_base, value))
-        parent, name = os.path.split(lexical)
-        path = os.path.join(resolve_cached_string(parent, resolutions), name)
+        parent, name = os.path.split(value)
+        if name in ('', '.', '..'):
+            # These final components change which object is the leaf. Keep
+            # full lexical normalization before resolving any symlink parent.
+            lexical = os.path.abspath(os.path.join(build_base, value))
+            parent, name = os.path.split(lexical)
+            resolved_parent = resolve_cached_string(parent, resolutions)
+        else:
+            resolved_parent = parents.get(parent)
+            if resolved_parent is None:
+                lexical_parent = os.path.abspath(os.path.join(build_base, parent))
+                resolved_parent = resolve_cached_string(lexical_parent, resolutions)
+                parents[parent] = resolved_parent
+        path = os.path.join(resolved_parent, name)
         try:
             current = os.lstat(path)
         except (FileNotFoundError, NotADirectoryError):
@@ -813,7 +839,7 @@ def normalize_input_paths(context):
                 current = os.stat(path)
             except (FileNotFoundError, NotADirectoryError):
                 continue
-        candidates[relative] = (path, current)
+        candidates[relative] = file_signature(current)
     return candidates
 
 
@@ -827,7 +853,7 @@ def normalized_input_candidates(root, build, paths, workers, local):
         return normalize_input_paths(context)
     started = time.perf_counter()
     candidates = {}
-    workers = min(workers, 4)
+    workers = min(workers, 8)
     window = 2 * workers * 4096
     with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn')) as pool:
         for offset in range(0, len(values), window):
@@ -851,13 +877,14 @@ def fingerprint_inputs(root, build, paths, previous=None, local=False):
     # Batches bound pending futures and memory; deterministic merge order also
     # keeps aliases from depending on thread completion order.
     items = []
-    for name, (path, current) in sorted(candidates.items()):
+    root_path = Path(os.path.abspath(root))
+    for name, signature in sorted(candidates.items()):
         cached = old.get(name)
-        if local and cached and cached.get('stat') == file_signature(current):
+        if local and cached and cached.get('stat') == signature:
             files[name] = cached
             reused += 1
         else:
-            items.append((name, Path(path), cached if local else None))
+            items.append((name, root_path / name, cached if local else None))
     next_progress = time.perf_counter() + 2
     if items:
         for records in fingerprint_batches(items, fingerprint_record, workers):
@@ -897,47 +924,110 @@ def fingerprint_batches(items, record_input, workers):
             yield from pool.map(partial(fingerprint_batch, record_input), batches)
 
 
+def directory_stat_changes(context):
+    """Check complete directory metadata without traversing cached children."""
+    build, entries = context
+    changed = []
+    for name, expected in entries:
+        path = build if name == '.' else os.path.join(build, name)
+        try:
+            current = os.stat(path, follow_symlinks=name == '.')
+            if file_signature(current) + [current.st_nlink] != expected:
+                changed.append(name)
+        except OSError:
+            # An obsolete cached child may no longer be reachable. Defer its
+            # error until traversal, or reject it during the final check.
+            changed.append(name)
+    return changed
+
+
+def checked_directory_changes(pool, build, entries, workers):
+    """Bound queued metadata checks and retain only mismatching names."""
+    changed = set()
+    window = 2 * workers * 1024
+    for offset in range(0, len(entries), window):
+        contexts = ((build, entries[index:index + 1024]) for index in range(
+            offset, min(offset + window, len(entries)), 1024))
+        for names in pool.map(directory_stat_changes, contexts):
+            changed.update(names)
+    return changed
+
+
 def depfile_inventory(build, previous=None, local=False, directory_index=None):
     """Rescan changed directories; stat checks preserve discovery of added files."""
     excluded = {'.cache', 'lsp-portable', '.clangd-lsp-work', '.git', '.incremental'}
     old = previous or {}
-    pending, scanned, reused = [('.', build)], 0, 0
+    # Keep cached directory names as strings; only emitted depfiles need Paths.
+    # Every reachable directory still gets the same complete stat check.
+    build_path = os.fspath(build)
+    workers = min(8, capture_worker_count())
+    parallel = local and len(old) >= DIRECTORY_PARALLEL_MIN and workers > 1 and sys.platform.startswith('linux')
+    pool = None
+    checked = None
+    observed = []
+    pending, scanned, reused = ['.'], 0, 0
     next_progress = time.perf_counter() + 2
-    while pending:
-        name, path = pending.pop()
-        before = path.stat() if name == '.' else path.lstat()
-        if name != '.' and stat_module.S_ISLNK(before.st_mode):
-            continue
-        signature = file_signature(before) + [before.st_nlink]
-        cached = old.get(name)
-        if local and cached and cached.get('timestamp_stable') and cached['stat'] == signature:
-            record = cached
-            reused += 1
-        else:
-            children, files = [], []
-            with os.scandir(path) as entries:
-                for entry in entries:
-                    if entry.name in excluded:
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        children.append(entry.name)
-                    elif entry.name.endswith('.d') and entry.is_file():
-                        files.append(entry.name)
-            after = path.stat() if name == '.' else path.lstat()
-            if file_signature(after) + [after.st_nlink] != signature:
-                raise RuntimeError(f'Output directory changed while collecting depfiles: {path}')
-            stable = max(before.st_mtime_ns, before.st_ctime_ns) < time.time_ns() - 2_000_000_000
-            record = {'stat': signature, 'children': sorted(children), 'depfiles': sorted(files),
-                      'timestamp_stable': stable}
-        scanned += 1
-        if directory_index is not None:
-            directory_index[name] = record
-        for filename in record['depfiles']:
-            yield path / filename
-        pending.extend((str(Path(name) / child), path / child) for child in record['children'])
-        if time.perf_counter() >= next_progress:
-            phase(f'depfile directory progress checked={scanned} reused={reused}')
-            next_progress = time.perf_counter() + 2
+    try:
+        if parallel:
+            pool = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn'))
+            entries = [(name, record['stat']) for name, record in old.items()
+                       if record.get('timestamp_stable')]
+            changed = checked_directory_changes(pool, build_path, entries, workers)
+            checked = {name for name, _ in entries} - changed
+            phase(f'depfile directory checks workers={workers} cached={len(entries)} changed={len(changed)}')
+        while pending:
+            name = pending.pop()
+            path = build_path if name == '.' else os.path.join(build_path, name)
+            cached = old.get(name)
+            if checked is not None and name in checked:
+                record = cached
+                reused += 1
+            else:
+                before = os.stat(path, follow_symlinks=name == '.')
+                if name != '.' and stat_module.S_ISLNK(before.st_mode):
+                    continue
+                signature = file_signature(before) + [before.st_nlink]
+                if local and cached and cached.get('timestamp_stable') and cached['stat'] == signature:
+                    record = cached
+                    reused += 1
+                else:
+                    children, files = [], []
+                    with os.scandir(path) as entries:
+                        for entry in entries:
+                            if entry.name in excluded:
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                children.append(entry.name)
+                            elif entry.name.endswith('.d') and entry.is_file():
+                                files.append(entry.name)
+                    after = os.stat(path, follow_symlinks=name == '.')
+                    if file_signature(after) + [after.st_nlink] != signature:
+                        raise RuntimeError(f'Output directory changed while collecting depfiles: {path}')
+                    stable = max(before.st_mtime_ns, before.st_ctime_ns) < time.time_ns() - 2_000_000_000
+                    record = {'stat': signature, 'children': sorted(children), 'depfiles': sorted(files),
+                              'timestamp_stable': stable}
+            scanned += 1
+            if pool is not None:
+                observed.append((name, record['stat']))
+            if directory_index is not None:
+                directory_index[name] = record
+            for filename in record['depfiles']:
+                yield Path(os.path.join(path, filename))
+            pending.extend(child if name == '.' else os.path.join(name, child)
+                           for child in record['children'])
+            if time.perf_counter() >= next_progress:
+                phase(f'depfile directory progress checked={scanned} reused={reused}')
+                next_progress = time.perf_counter() + 2
+        if pool is not None:
+            # Prefetched metadata predates traversal. Recheck every visited
+            # directory so concurrent additions cannot seal an incomplete set.
+            changed = checked_directory_changes(pool, build_path, observed, workers)
+            if changed:
+                name = min(changed)
+                raise RuntimeError(f'Output directory changed while collecting depfiles: {os.path.join(build_path, name)}')
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True)
     phase(f'depfile directories checked={scanned} reused={reused}')
 
 
@@ -956,7 +1046,8 @@ def collect_retained_depfiles(build, paths, target, *, previous=None, local=Fals
         return absolute_paths[value]
     initial_paths = paths.copy()
     base_digest = hashlib.sha256('\0'.join(sorted(paths | {target})).encode()).hexdigest()
-    known = {absolute(path) for path in paths | {target}}
+    # A fully reused closure needs no absolute-path discovery set.
+    known = None
     records = {}
     old = previous or {}
     deferred = 0
@@ -972,6 +1063,7 @@ def collect_retained_depfiles(build, paths, target, *, previous=None, local=Fals
         # Changes outside the old reachable closure cannot affect it unless a
         # new/changed producer now supplies a path in that closure.
         retained_names = set(closure['retained'])
+        known = {absolute(path) for path in paths | {target}}
         known_closure = known | {absolute(value) for value in closure['extra_inputs']}
         same_inventory = (
             retained_names.issubset(parsed)
@@ -989,6 +1081,8 @@ def collect_retained_depfiles(build, paths, target, *, previous=None, local=Fals
             records[name] = [signature[2], signature[3], record['sha256']]
         phase(f'retained closure reused files={len(records)}')
     else:
+        if known is None:
+            known = {absolute(path) for path in paths | {target}}
         pending, loaded = deque(known), set()
         while pending:
             for relative in producers.get(pending.popleft(), ()):
@@ -1091,33 +1185,287 @@ def scan_retained_depfiles(build, previous=None, local=False, directories=None, 
     return parsed, producers
 
 
-def collect_capture_inventory(root, build, target, cache, local):
-    """Join bounded read-only stages before fingerprinting or publishing state."""
+def ninja_deps_signature(build):
+    try:
+        return file_signature((build / '.ninja_deps').stat())
+    except FileNotFoundError:
+        return None
+
+
+def check_ninja_deps_snapshot(build, expected, expected_digest=None):
+    if ninja_deps_signature(build) != expected:
+        raise RuntimeError('Ninja dependency log changed while collecting baseline')
+    # A same-size rewrite with restored mtime can share the filesystem's ctime
+    # tick. Recheck content at publication, not only the cached stat signature.
+    if expected is not None and expected_digest is not None:
+        if digest(build / '.ninja_deps') != expected_digest:
+            raise RuntimeError('Ninja dependency log changed while collecting baseline')
+        if ninja_deps_signature(build) != expected:
+            raise RuntimeError('Ninja dependency log changed while collecting baseline')
+
+
+def read_ninja_deps_snapshot(path, expected_digest):
+    try:
+        content, signature = stable_bytes(path)
+    except (OSError, RuntimeError) as error:
+        raise RuntimeError('Ninja dependency log changed while collecting baseline') from error
+    if hashlib.sha256(content).hexdigest() != expected_digest:
+        raise RuntimeError('Ninja dependency log changed while collecting baseline')
+    if sys.byteorder != 'little' or content[:16] != b'# ninjadeps\n\x04\0\0\0':
+        return None
+    view = memoryview(content)
+    names, seen, records, hashes = [], set(), {}, {}
+    paths = hashlib.sha256()
+    offset = 16
+    while offset < len(content):
+        if offset + 4 > len(content):
+            return None
+        field = struct.unpack_from('<I', content, offset)[0]
+        size, dependency = field & 0x7fffffff, bool(field & 0x80000000)
+        start, end = offset + 4, offset + 4 + size
+        if size % 4 or size > (1 << 19) - 1 or end > len(content):
+            return None
+        if dependency:
+            if size < 12:
+                return None
+            output = struct.unpack_from('<I', content, start)[0]
+            inputs = view[start + 12:end]
+            if output >= len(names) or (inputs and max(inputs.cast('I')) >= len(names)):
+                return None
+            record = hashlib.sha256(view[start:start + 4])
+            record.update(inputs)
+            hashes[output] = record.digest()
+            records[output] = (start + 12, end)
+        else:
+            if size < 8:
+                return None
+            raw = content[start:end - 4]
+            name = raw.rstrip(b'\0')
+            checksum = struct.unpack_from('<I', content, end - 4)[0]
+            if (not name or b'\0' in name or len(raw) - len(name) > 3
+                    or name in seen or (~checksum & 0xffffffff) != len(names)):
+                return None
+            names.append(name)
+            seen.add(name)
+            paths.update(view[offset:end])
+        offset = end
+    identity = hashlib.sha256(b'ohos-ninja-deps-v4-content-1\0' + paths.digest())
+    for output, value in sorted(hashes.items()):
+        identity.update(struct.pack('<I', output))
+        identity.update(value)
+    return {'content': content, 'names': names, 'records': records,
+            'identity': identity.hexdigest(), 'signature': signature}
+
+
+def collect_ninja_deps_with_outputs(root, build):
+    """Obtain liveness from Ninja, validating the complete output block stream."""
+    import re
+    header = re.compile(r'(.+): #deps ([0-9]+), deps mtime -?[0-9]+ \((?:STALE|VALID)\)')
+    paths, live, remaining, valid = set(), {}, 0, True
+    command = ninja_command(root, build, '-n', '-t', 'deps')
+    with subprocess.Popen(command, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL) as process:
+        for line in process.stdout:
+            if line.startswith('    '):
+                paths.add(line.strip())
+            if not valid:
+                continue
+            if remaining:
+                if not line.startswith('    '):
+                    valid = False
+                else:
+                    remaining -= 1
+                continue
+            value = line[:-1] if line.endswith('\n') else line
+            if not value:
+                continue
+            match = header.fullmatch(value)
+            if match and not line.startswith('    ') and match[1] not in live:
+                live[match[1]] = int(match[2])
+                remaining = int(match[2])
+            elif (value.endswith(': deps not found') and not line.startswith('    ')):
+                continue
+            else:
+                valid = False
+        if process.wait():
+            raise RuntimeError('Ninja deps query failed')
+    return paths, live if valid and remaining == 0 else None
+
+
+def decode_ninja_deps_outputs(value, context):
+    if not isinstance(value, str) or len(value) > NINJA_DEPS_INDEX_LIMIT * 2:
+        return None
+    try:
+        compressed = base64.b64decode(value, validate=True)
+        stream = zlib.decompressobj()
+        data = stream.decompress(compressed, NINJA_DEPS_INDEX_LIMIT + 1)
+        if len(data) > NINJA_DEPS_INDEX_LIMIT or not stream.eof or stream.unused_data:
+            return None
+        decoded = json.loads(data)
+        if (type(decoded.get('version')) is not int or decoded.get('version') != 1
+                or decoded.get('context') != context):
+            return None
+        rows = decoded['outputs']
+        if not isinstance(rows, list):
+            return None
+        result = {}
+        for row in rows:
+            if (not isinstance(row, list) or len(row) != 2
+                    or not isinstance(row[0], str) or not row[0]
+                    or type(row[1]) is not bool or row[0] in result
+                    or any(c in row[0] for c in '\r\n\0')):
+                return None
+            result[row[0]] = row[1]
+        return result
+    except (ValueError, TypeError, KeyError, AttributeError, zlib.error):
+        return None
+
+
+def indexed_ninja_deps_paths(data, value, context, *, local=True):
+    if data is None or context is None or not local:
+        return None
+    known = decode_ninja_deps_outputs(value, context)
+    if known is None:
+        return None
+    names, view, ids = data['names'], memoryview(data['content']), set()
+    try:
+        for output, (start, end) in data['records'].items():
+            name = names[output].decode('utf-8')
+            if any(c in name for c in '\r\n\0') or name not in known:
+                return None
+            if known[name]:
+                ids.update(view[start:end].cast('I'))
+        result = set()
+        for index in ids:
+            name = names[index].decode('utf-8')
+            if any(c in name for c in '\r\n\0'):
+                return None
+            result.add(name.strip())  # Match the existing text collector exactly.
+        return result
+    except UnicodeError:
+        return None
+
+
+def make_ninja_deps_outputs(data, live, expected_paths, context):
+    if data is None or context is None or live is None:
+        return None
+    try:
+        names = [name.decode('utf-8') for name in data['names']]
+    except UnicodeError:
+        return None
+    if any(any(c in name for c in '\r\n\0') for name in names):
+        return None
+    counts = {names[output]: (end - start) // 4
+              for output, (start, end) in data['records'].items()}
+    if any(name not in counts or count != counts[name] for name, count in live.items()):
+        return None
+    rows = [[name, name in live] for name in sorted(counts)]
+    encoded = json.dumps({'version': 1, 'context': context, 'outputs': rows},
+                         ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    if len(encoded) > NINJA_DEPS_INDEX_LIMIT:
+        return None
+    value = base64.b64encode(zlib.compress(encoded, 1)).decode('ascii')
+    return value if indexed_ninja_deps_paths(data, value, context) == expected_paths else None
+
+
+def ninja_deps_content_identity(path, expected_digest, *, snapshot_result=None):
+    """Validate v4 content, optionally retaining a short-lived parsed snapshot."""
+    started = time.perf_counter()
+    result = read_ninja_deps_snapshot(path, expected_digest)
+    if result is None:
+        return None
+    if snapshot_result is not None:
+        snapshot_result.update(result)
+    phase(f'Ninja deps content checked bytes={len(result["content"])} '
+          f'outputs={len(result["records"])}', started)
+    return result['identity']
+
+
+def ninja_deps_index_context(root, build, graph):
+    if graph is None:
+        return None
+    content = {name: record['sha256'] for name, record in graph.items()}
+    return {'root': str(root), 'build_dir': str(build.relative_to(root)),
+            'graph': hashlib.sha256(json.dumps(content, sort_keys=True,
+                                               separators=(',', ':')).encode()).hexdigest(),
+            'ninja': digest(Path(ninja_command(root, build)[0])),
+            'instance': instance_identity(root)}
+
+
+def collect_capture_inventory(root, build, target, cache, local, deps_metadata=None):
+    """Collect paths using a graph-bound output index when its membership is known."""
     deps_path = build / '.ninja_deps'
-    deps_digest = digest(deps_path) if deps_path.is_file() else None
+    deps_signature = ninja_deps_signature(build)
+    deps_digest = digest(deps_path) if deps_signature is not None else None
+    check_ninja_deps_snapshot(build, deps_signature)
     same_deps = bool(cache and cache.get('deps_sha256') == deps_digest)
-    directories = {}
+    previous_content = cache.get('deps_content_sha256') if cache else None
+    valid_content = isinstance(previous_content, str) and re.fullmatch('[0-9a-f]{64}', previous_content)
+    previous_index = cache.get('deps_outputs_index') if cache else None
+    directories, snapshot_state, query_metadata = {}, {}, {}
+    outputs_index, indexed_candidate, used_index = None, None, False
     workers = min(3, capture_worker_count())
     graph_started = time.perf_counter()
+    def query_deps():
+        return collect_ninja_paths(root, build, 'deps', target, deps_metadata=query_metadata)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         graph_task = pool.submit(graph_content_records, root, build,
                                  cache.get('graph') if cache else None, local)
         inventory_task = pool.submit(scan_retained_depfiles, build,
                                      cache.get('depfiles') if cache else None, local,
                                      cache.get('directories') if cache else None, directories)
-        deps_task = None if same_deps else pool.submit(collect_ninja_paths, root, build, 'deps', target)
+        identity_task = (pool.submit(ninja_deps_content_identity, deps_path, deps_digest,
+                                     snapshot_result=snapshot_state)
+                         if deps_digest is not None and (not same_deps or not valid_content) else None)
+        deps_task = None if same_deps or (local and valid_content) else pool.submit(query_deps)
+        content_identity = (identity_task.result() if identity_task else
+                            previous_content if deps_digest is not None and same_deps else None)
+        if (not same_deps and local and content_identity != previous_content
+                and previous_index is not None and snapshot_state):
+            context = ninja_deps_index_context(root, build, cache.get('graph'))
+            indexed_candidate = indexed_ninja_deps_paths(snapshot_state, previous_index, context)
+        if (not same_deps and deps_task is None and indexed_candidate is None
+                and content_identity != previous_content):
+            deps_task = pool.submit(query_deps)
         graph = graph_task.result()
         same_graph = bool(cache and same_graph_content(cache.get('graph'), graph))
         phase(f'complete Ninja graph checked files={len(graph or {})} same_content={same_graph}', graph_started)
+        if (not same_deps and local and same_graph and valid_content
+                and content_identity is not None and content_identity == previous_content):
+            same_deps = True
+            phase('Ninja deps content unchanged; reusing dependency paths')
         inputs_task = None if same_graph else pool.submit(collect_ninja_paths, root, build, 'inputs', target)
         if same_graph and same_deps:
             deps = set(cache['ninja_deps'])
+            outputs_index = previous_index if local else None
+        elif same_graph and indexed_candidate is not None:
+            deps = indexed_candidate
+            outputs_index, used_index = previous_index, True
+            phase(f'Ninja deps paths rebuilt from active-output index paths={len(deps)}')
         else:
-            deps_task = deps_task or pool.submit(collect_ninja_paths, root, build, 'deps', target)
+            # A graph-only change also needs a snapshot to bind the new index.
+            # Parse it while the mandatory full Ninja query is still running.
+            if identity_task is None and deps_digest is not None:
+                identity_task = pool.submit(ninja_deps_content_identity, deps_path, deps_digest,
+                                             snapshot_result=snapshot_state)
+            deps_task = deps_task or pool.submit(query_deps)
             deps = deps_task.result()
+            if identity_task is not None:
+                content_identity = identity_task.result()
+            if snapshot_state and query_metadata.get('live_outputs') is not None:
+                context = ninja_deps_index_context(root, build, graph)
+                outputs_index = make_ninja_deps_outputs(
+                    snapshot_state, query_metadata['live_outputs'], deps, context)
         inputs = set(cache['ninja_inputs']) if same_graph else inputs_task.result()
         inventory = inventory_task.result()
-    phase(f'Ninja inventory reused inputs={same_graph} deps={same_graph and same_deps}')
+        # Do not retain the large binary log through input fingerprinting.
+        snapshot_state.clear()
+        query_metadata.clear()
+    check_ninja_deps_snapshot(build, deps_signature)
+    phase(f'Ninja inventory reused inputs={same_graph} deps={same_graph and same_deps} indexed={used_index}')
+    if deps_metadata is not None:
+        deps_metadata.update(content_identity=content_identity, log_signature=deps_signature,
+                             outputs_index=outputs_index, used_outputs_index=used_index)
     return graph, deps_digest, same_graph, same_deps, inputs, deps, inventory, directories
 
 
@@ -1139,8 +1487,9 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
         phase(f'Ninja audit complete planned={count}', audit_started)
         if code or (count and not allow_dirty):
             raise RuntimeError(f'Cannot seal a clean baseline: exit={code}, planned={count}.\n' + output[-4000:])
+    deps_metadata = {}
     graph, deps_digest, same_graph, same_deps, inputs, deps, inventory, directory_index = \
-        collect_capture_inventory(root, build, target, cache, local)
+        collect_capture_inventory(root, build, target, cache, local, deps_metadata)
     paths = inputs | deps
     depfile = build / 'build.ninja.d'
     if depfile.exists():
@@ -1193,11 +1542,18 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
                   'canonical_root': str(root), 'build_dir': str(build.relative_to(root)),
                   'target': target, 'instance': local_collection_identity(root), 'graph': graph,
                   'ninja_sha256': digest(Path(ninja_command(root, build)[0])),
-                  'deps_sha256': deps_digest, 'ninja_inputs': sorted(inputs),
+                  'deps_sha256': deps_digest, 'deps_content_sha256': deps_metadata['content_identity'],
+                  'ninja_inputs': sorted(inputs),
                   'ninja_deps': sorted(deps), 'depfiles': dep_index,
                   'directories': directory_index, 'closure': closure_index}
+    if deps_metadata.get('outputs_index') is not None:
+        collection['deps_outputs_index'] = deps_metadata['outputs_index']
     cache_started = time.perf_counter()
     unchanged_index = (local and same_graph and same_deps
+                       and 'deps_content_sha256' in cache
+                       and cache.get('deps_sha256') == deps_digest
+                       and cache.get('deps_content_sha256') == deps_metadata['content_identity']
+                       and cache.get('deps_outputs_index') == deps_metadata.get('outputs_index')
                        and cache.get('depfile_cache_format') == DEPFILE_CACHE_FORMAT
                        and cache.get('directories', {}).keys() == directory_index.keys()
                        and all(not entry.get('timestamp_stable')
@@ -1207,6 +1563,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
                        and cache['depfiles'].keys() == dep_index.keys()
                        and all(cache['depfiles'][name]['sha256'] == entry['sha256']
                                for name, entry in dep_index.items()))
+    check_ninja_deps_snapshot(build, deps_metadata['log_signature'], deps_digest)
     if unchanged_index:
         generation = cache['generation']
         phase('collection index reused (unchanged dependency content)')
@@ -1220,6 +1577,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
     destination = root / (manifest or MANIFEST)
     save_started = time.perf_counter()
     phase('writing baseline manifest')
+    check_ninja_deps_snapshot(build, deps_metadata['log_signature'], deps_digest)
     write_manifest(destination, data)
     phase('baseline manifest written', save_started)
     print(json.dumps({'manifest': str(destination), 'source_inputs': len(files), 'baseline_planned': count}))

@@ -17,6 +17,10 @@
 #
 
 
+import os
+import subprocess
+import sys
+
 from modules.interface.build_module_interface import BuildModuleInterface
 from resolver.interface.args_resolver_interface import ArgsResolverInterface
 from services.interface.preload_interface import PreloadInterface
@@ -140,7 +144,36 @@ class OHOSBuildModule(BuildModuleInterface):
         args_key="args_dict",
     )
     def _post_target_compilation(self):
+        self._record_incremental_baseline()
         self._run_phase(BuildPhase.POST_TARGET_COMPILATION)
+
+    def _record_incremental_baseline(self):
+        # Seal the successful Ninja build before optional OSKM/LSP collection.
+        # A partial build must never replace the transferable make_all baseline.
+        if (self.args_dict['build_target'].arg_value != ['make_all']
+                or self.args_dict['build_only_load'].arg_value
+                or self.args_dict['build_only_gn'].arg_value):
+            return
+        from resources.global_var import CURRENT_OHOS_ROOT
+        from scripts.incremental_product_policy import resolve
+
+        arguments = sys.argv[2:]
+        if not resolve(CURRENT_OHOS_ROOT, arguments)['enabled']:
+            return
+        # HB can select make_all without an explicit CLI target. Pass the
+        # resolved full-product target to finish, whose parser has no HB defaults.
+        if not any(argument == '--build-target' or argument.startswith('--build-target=')
+                   for argument in arguments):
+            arguments = [*arguments, '--build-target', 'make_all']
+        command = [sys.executable,
+                   os.path.join(CURRENT_OHOS_ROOT, 'build/scripts/incremental_workspace.py'),
+                   '--root', CURRENT_OHOS_ROOT, 'finish', '--', *arguments]
+        try:
+            result = subprocess.run(command)
+        except OSError as error:
+            raise OHOSException(f'Cannot record the relocatable baseline: {error}', '4000') from error
+        if result.returncode:
+            raise OHOSException('Build completed but recording the relocatable baseline failed.', '4000')
 
     def _post_build(self):
         self._run_phase(BuildPhase.POST_BUILD)
