@@ -394,3 +394,77 @@ Ninja 对损坏或版本不支持的 deps 日志仍可能执行自身的恢复�
 索引与基线使用紧凑 JSON 编码，字段、值、版本、摘要校验和读取方式不变。
 索引仍先准备并绑定摘要，基线由主进程最后原子发布；不会并行覆盖同一个文件。
 依赖查询继续调用原有官方 Ninja 命令，不解析或改写二进制 deps 日志来省略查询。
+
+## Reuse unchanged Loader/GN configuration
+
+For products already opted into `build_framework_enable_incremental_build`, the
+first successful `make_all` build without an existing build graph, Ninja log
+or artifact directories can record a configuration snapshot. Repeating the same build command can reuse Loader/GN
+when configuration inputs, directory membership, generated outputs, environment
+and arguments match.
+Preloader, argument resolution, SDK checks, Ninja and post-build processing still
+run. Explicit fast-rebuild, GN flags and load-only/GN-only modes retain their
+existing paths.
+
+Discovery is confined to configuration trees (build/device/vendor/productdefine/component_dist)
+and the subsystem paths the selected product actually builds, read from the Preloader's
+`subsystem_config.json`, instead of walking the whole source tree. It covers
+bundle/ohos.build files, GN and build scripts, and configuration files. All dependencies
+in `build.ninja.d` and Preloader/products_ext files are also checked. Directory metadata
+avoids repeating a full tree walk when membership is unchanged. Like normal GN
+regeneration, scripts must declare their external inputs correctly; this cache does
+not infer undeclared exec_script dependencies. Runtime caches and node_modules are
+excluded from additional discovery, but explicit GN dependencies remain checked.
+The normalized discovery roots are part of the input snapshot. Adding, removing
+or replacing a subsystem path invalidates reuse. Root order and duplicate
+spellings do not cause rescans. Missing subsystem roots are represented by a
+watch on their nearest existing parent's membership, so partial checkouts can
+record a snapshot and the later appearance of such a root invalidates it.
+
+On capture, a read-only `ninja -t inputs -0 -E make_all` query discovers generated
+inputs, including extensionless names and paths with spaces. Loader outputs and
+Ninja files are also checked. Outputs use filesystem metadata checks rather than
+content hashing. The environment signature is a whitelist of build-affecting
+prefixes (`OHOS_`, `GN_`, `PYTHON`, `npm_config_`, `ohpm_`, `depot_tools_`,
+`CCACHE_`, `XCACHE_`, `LCACHE_`); PATH
+is not included directly: HB's selected ccache/xcache/lcache paths and settings
+are fingerprinted through their environment variables, as are GN's USE_CCACHE,
+USE_XCACHE, CACHE_BASE and FORCE_MAC_SDK_MIN values. GN/Ninja binaries are covered
+by signatures in the cache context. Invocation UUID/PID and baseline worker
+counts are excluded; product policy and build timestamps remain checked.
+Schema version 5 stores a compressed, path-compacted snapshot in
+`out/<product>/.incremental/configuration.snapshot.z`, a separate core proof in
+`configuration.priority.z`, and a small successful-build marker in
+`configuration.success.json`. The marker binds both snapshot digests,
+filesystem signature, configuration context and local workspace/boot identity.
+Older `configuration.json` records are ignored without loading them.
+
+For an existing out, an absent/invalid marker, changed context or migrated
+workspace immediately uses the original Loader/GN path. These paths do not
+recapture a configuration inventory after GN or rewrite a large record at build
+exit. If validation of an existing snapshot fails, this build also uses the
+original path without rebuilding the cache. This deliberately favors bounded
+fallback over automatically regaining Loader/GN reuse: after configuration
+changes, corruption, interruption or migration, reuse remains disabled until a
+new cold successful build establishes another snapshot. Existing incremental
+baseline/relocation and Ninja behavior are unaffected.
+
+On a local hit, metadata checks run serially and stop at the first mismatch.
+GN/Preloader inputs and their parent directories are checked from a separate
+small proof before loading the larger discovery inventory; same-content
+rewrites are hashed when necessary. Only a successful HB build
+publishes the marker. A warm finish keeps the verified snapshot immutable and
+only republishes the small marker; it does not walk output trees or serialize
+the inventory again. If Ninja regenerated the GN depfile, no marker is
+republished. Other changed outputs are conservatively rejected by the next
+probe. Initial snapshot collection is limited to the cold path, where its
+one-time cost is permitted; no detached collector survives build exit.
+
+Cache errors do not turn a successful original build into a failure.
+Keep source files stable during a build and do not build concurrently into one
+output directory. No GN template, compiler default or image format is changed.
+
+GN platform substring checks use the built-in `filter_include` instead of
+starting Python scripts. Test module-list generation retains identical JSON and
+does not rewrite unchanged output. These direct GN optimizations apply even
+when configuration reuse falls back to the original Loader/GN path.
