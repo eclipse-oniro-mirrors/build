@@ -17,15 +17,11 @@ import optparse
 import os
 import sys
 import json
-sys.path.append(
-    os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))))
-from scripts.util import build_utils  # noqa: E402
 
 
 def _parse_args(args):
     parser = optparse.OptionParser()
-    build_utils.add_depfile_option(parser)
+    parser.add_option('--depfile', help='Path to depfile (refer to `gn help depfile`)')
     parser.add_option('--output_dir', help='output directory')
     parser.add_option('--source_dir', help='source directory')
     parser.add_option('--target', help='name of target')
@@ -33,10 +29,9 @@ def _parse_args(args):
     parser.add_option('--test_type')
     parser.add_option('--module_list_file', help='file name of module list')
     options, _ = parser.parse_args(args)
-    build_utils.check_options(options,
-                             parser,
-                             required=('output_dir', 'target', 'source_dir',
-                                       'target_label', 'module_list_file'))
+    for name in ('output_dir', 'target', 'source_dir', 'target_label', 'module_list_file'):
+        if getattr(options, name) is None:
+            parser.error('--%s is required' % name.replace('_', '-'))
     return options, parser
 
 
@@ -44,14 +39,21 @@ def main(args):
     options, _ = _parse_args(args)
     if not os.path.exists(os.path.dirname(options.module_list_file)):
         os.makedirs(os.path.dirname(options.module_list_file), exist_ok=True)
+    contents = json.dumps([{
+        'target': options.target,
+        'label': options.target_label,
+        'source_directory': options.source_dir,
+        'output_directory': options.output_dir,
+        'test_type': options.test_type
+    }])
+    try:
+        with open(options.module_list_file) as f:
+            if f.read() == contents:
+                return
+    except (OSError, UnicodeError):
+        # Preserve the previous write behavior for missing/unreadable output.
+        pass
     with open(options.module_list_file, 'w') as f:
-        contents = json.dumps([{
-            'target': options.target,
-            'label': options.target_label,
-            'source_directory': options.source_dir,
-            'output_directory': options.output_dir,
-            'test_type': options.test_type
-        }])
         f.write(contents)
 
 

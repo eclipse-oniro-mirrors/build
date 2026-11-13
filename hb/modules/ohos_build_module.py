@@ -52,6 +52,7 @@ class OHOSBuildModule(BuildModuleInterface):
                          loader, target_generator, target_compiler)
         OHOSBuildModule._instance = self
         self._start_time = SystemUtil.get_current_time()
+        self._configuration_cache = None
 
     @property
     def build_time(self):
@@ -75,6 +76,8 @@ class OHOSBuildModule(BuildModuleInterface):
             raise exception
         else:
             monitor.run()
+            if self._configuration_cache is not None:
+                self._configuration_cache.commit()
             LogUtil.hb_info('{} build success'.format(
                 self.args_dict.get('product_name').arg_value))
 
@@ -100,6 +103,10 @@ class OHOSBuildModule(BuildModuleInterface):
     )
     def _load(self):
         self._run_phase(BuildPhase.LOAD)
+        from scripts.configuration_cache import ConfigurationCache
+        self._configuration_cache = ConfigurationCache.for_build(self)
+        if self._configuration_cache is not None and self._configuration_cache.probe():
+            return
         if self.args_dict.get('fast_rebuild', None) and not self.args_dict.get('fast_rebuild').arg_value:
             LogUtil.set_stage("[LOAD]")
             self.loader.run()
@@ -115,10 +122,18 @@ class OHOSBuildModule(BuildModuleInterface):
     )
     def _target_generate(self):
         self._run_phase(BuildPhase.TARGET_GENERATE)
+        if self._configuration_cache is not None:
+            reused_loader = self._configuration_cache.reuse
+            if self._configuration_cache.check_gn(self.target_generator):
+                return
+            if reused_loader:
+                self.loader.run()
         if not self.args_dict.get("build_only_load").arg_value and not self.args_dict.get("fast_rebuild").arg_value:
             LogUtil.set_stage("[GN]")
             self.target_generator.run()
             LogUtil.clear_stage()
+            if self._configuration_cache is not None:
+                self._configuration_cache.after_gn()
 
     def _post_target_generate(self):
         self._run_phase(BuildPhase.POST_TARGET_GENERATE)

@@ -446,112 +446,52 @@ declare_args() {
   enable_oskm_collect = false
 }
 
-python_script = "//build/scripts/is_substring.py"
+# Match the platform strings without starting a Python process.
 
-if (exec_script(python_script,
-                [
-                  sdk_platform,
-                  "default",
-                ],
-                "string") == "True") {
+if (filter_include([ sdk_platform ], [ "*default*" ]) != []) {
   build_default_sdk_target = true
 }
 
-if (exec_script(python_script,
-                [
-                  sdk_platform,
-                  "mac",
-                ],
-                "string") == "True") {
+if (filter_include([ sdk_platform ], [ "*mac*" ]) != []) {
   build_mac_sdk_target = true
 }
 
-if (exec_script(python_script,
-                [
-                  sdk_platform,
-                  "win",
-                ],
-                "string") == "True") {
+if (filter_include([ sdk_platform ], [ "*win*" ]) != []) {
   build_windows_sdk_target = true
 }
 
-if (exec_script(python_script,
-                [
-                  sdk_platform,
-                  "linux",
-                ],
-                "string") == "True") {
+if (filter_include([ sdk_platform ], [ "*linux*" ]) != []) {
   build_linux_sdk_target = true
 }
 
-if (exec_script(python_script,
-                [
-                  sdk_platform,
-                  "arm64",
-                ],
-                "string") == "True") {
+if (filter_include([ sdk_platform ], [ "*arm64*" ]) != []) {
   build_linux_arm64_sdk_target = true
 }
 
-if (exec_script(python_script,
-                [
-                  sdk_platform,
-                  "ohos",
-                ],
-                "string") == "True") {
+if (filter_include([ sdk_platform ], [ "*ohos*" ]) != []) {
   build_ohos_sdk_target = true
 }
 
-if (exec_script(python_script,
-                [
-                  ndk_platform,
-                  "default",
-                ],
-                "string") == "True") {
+if (filter_include([ ndk_platform ], [ "*default*" ]) != []) {
   build_default_ndk_target = true
 }
 
-if (exec_script(python_script,
-                [
-                  ndk_platform,
-                  "mac",
-                ],
-                "string") == "True") {
+if (filter_include([ ndk_platform ], [ "*mac*" ]) != []) {
   build_mac_ndk_target = true
 }
 
-if (exec_script(python_script,
-                [
-                  ndk_platform,
-                  "win",
-                ],
-                "string") == "True") {
+if (filter_include([ ndk_platform ], [ "*win*" ]) != []) {
   build_windows_ndk_target = true
 }
 
-if (exec_script(python_script,
-                [
-                  ndk_platform,
-                  "linux",
-                ],
-                "string") == "True") {
+if (filter_include([ ndk_platform ], [ "*linux*" ]) != []) {
   build_linux_ndk_target = true
 }
 
-if (exec_script(python_script,
-                [
-                  ndk_platform,
-                  "arm64",
-                ],
-                "string") == "True") {
+if (filter_include([ ndk_platform ], [ "*arm64*" ]) != []) {
   build_linux_arm64_ndk_target = true
 }
 
-if (exec_script(python_script,
-                [
-                  ndk_platform,
-                  "ohos",
-                ],
-                "string") == "True") {
+if (filter_include([ ndk_platform ], [ "*ohos*" ]) != []) {
   build_ohos_ndk_target = true
 }
