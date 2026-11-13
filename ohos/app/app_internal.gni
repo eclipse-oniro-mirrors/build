@@ -590,7 +590,7 @@ template("app_sign") {
       "--hap-name",
       hap_name,
     ]
-    if (_sign_hap_py_path == "//build/scripts/app_sign.py") {
+    if (!build_xts && _sign_hap_py_path == "//build/scripts/app_sign.py") {
       depfile = "${target_gen_dir}/${target_name}.d"
       args += [
         "--stamp",
@@ -688,11 +688,18 @@ template("compile_app") {
                            ])
     script = "//build/scripts/compile_app.py"
     outputs = [ unsigned_hap_path_list ]
-    depfile = "${target_gen_dir}/${target_name}.d"
+    args = []
+    if (!build_xts) {
+      # XTS builds many independent HAPs against one prepared SDK. Preserve
+      # their original path without per-HAP SDK scans or project locking.
+      depfile = "${target_gen_dir}/${target_name}.d"
+      args += [
+        "--depfile",
+        rebase_path(depfile, root_build_dir),
+      ]
+    }
 
-    args = [
-      "--depfile",
-      rebase_path(depfile, root_build_dir),
+    args += [
       "--nodejs",
       rebase_path(_nodejs, root_build_dir),
       "--cwd",
