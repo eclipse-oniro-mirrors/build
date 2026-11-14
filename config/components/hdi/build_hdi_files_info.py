@@ -86,12 +86,12 @@ class Lexer(object):
     def peek_char(self, peek_count=0):
         index = self.read_index + peek_count
         if index >= self.data_len:
-            return Char(True, '0')
-        return Char(False, self.data[index])
+            return None
+        return self.data[index]
 
     def get_char(self):
         if self.read_index >= self.data_len:
-            return Char(True, '0')
+            return None
         read_index = self.read_index
         self.read_index += 1
         if self.data[read_index] == '\n':
@@ -99,7 +99,7 @@ class Lexer(object):
             self.cur_col = 1
         else:
             self.cur_col += 1
-        return Char(False, self.data[read_index])
+        return self.data[read_index]
 
     def peek_token(self):
         if not self.have_peek:
@@ -115,33 +115,36 @@ class Lexer(object):
 
     def read_token(self):
         self.cur_token.clean()
-        while not self.peek_char().is_eof:
+        while True:
             new_char = self.peek_char()
-            if new_char.char.isspace():
+            if new_char is None:
+                self.cur_token.token_type = TokenType.END_OF_FILE
+                return
+            if new_char.isspace():
                 self.get_char()
                 continue
             self.cur_token.row = self.cur_row
             self.cur_token.col = self.cur_col
-            if new_char.char.isalpha() or new_char.char == '_':
+            if new_char.isalpha() or new_char == '_':
                 self.read_id()
                 return
-            if new_char.char == '/':
+            if new_char == '/':
                 self.read_comment()
                 return
-            self.cur_token.value = new_char.char
+            self.cur_token.value = new_char
             self.cur_token.token_type = TokenType.UNKNOWN
             self.get_char()
             return
-        self.cur_token.token_type = TokenType.END_OF_FILE
 
     def read_id(self):
         token_value = []
-        token_value.append(self.get_char().char)
-        while not self.peek_char().is_eof:
+        token_value.append(self.get_char())
+        while True:
             new_char = self.peek_char()
-            if new_char.char.isalpha() or new_char.char.isdigit(
-            ) or new_char.char == '_' or new_char.char == '.':
-                token_value.append(new_char.char)
+            if new_char is None:
+                break
+            if new_char.isalpha() or new_char.isdigit() or new_char == '_' or new_char == '.':
+                token_value.append(new_char)
                 self.get_char()
                 continue
             break
@@ -154,36 +157,38 @@ class Lexer(object):
 
     def read_comment(self):
         token_value = []
-        token_value.append(self.get_char().char)
+        token_value.append(self.get_char())
         new_char = self.peek_char()
-        if not new_char.is_eof:
-            if new_char.char == '/':
+        if new_char is not None:
+            if new_char == '/':
                 self.read_line_comment(token_value)
                 return
-            elif new_char.char == '*':
+            elif new_char == '*':
                 self.read_block_comment(token_value)
                 return
         self.cur_token.token_type = TokenType.UNKNOWN
         self.cur_token.value = "".join(token_value)
 
     def read_line_comment(self, token_value):
-        token_value.append(self.get_char().char)
-        while not self.peek_char().is_eof:
+        token_value.append(self.get_char())
+        while True:
             new_char = self.get_char()
-            if new_char.char == '\n':
+            if new_char is None or new_char == '\n':
                 break
-            token_value.append(new_char.char)
+            token_value.append(new_char)
         self.cur_token.token_type = TokenType.COMMENT
         self.cur_token.value = "".join(token_value)
 
     def read_block_comment(self, token_value):
         # read *
-        token_value.append(self.get_char().char)
-        while not self.peek_char().is_eof:
+        token_value.append(self.get_char())
+        while True:
             new_char = self.get_char()
-            token_value.append(new_char.char)
-            if new_char.char == '*' and self.peek_char().char == '/':
-                token_value.append(self.get_char().char)
+            if new_char is None:
+                break
+            token_value.append(new_char)
+            if new_char == '*' and self.peek_char() == '/':
+                token_value.append(self.get_char())
                 break
         value = "".join(token_value)
         if value.endswith("*/"):
