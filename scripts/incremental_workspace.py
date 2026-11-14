@@ -977,6 +977,31 @@ def checked_directory_changes(pool, build, entries, workers):
     return changed
 
 
+def read_stable_depfile_directory(path, before, signature, excluded, follow_root):
+    """Rescan a raced listing, keeping identity and bounded-stability checks."""
+    for attempt in range(3):
+        children, files = [], []
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if entry.name in excluded:
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    children.append(entry.name)
+                elif entry.name.endswith('.d') and entry.is_file():
+                    files.append(entry.name)
+        after = os.stat(path, follow_symlinks=follow_root)
+        current = file_signature(after) + [after.st_nlink]
+        if current == signature:
+            stable = max(before.st_mtime_ns, before.st_ctime_ns) < time.time_ns() - 2_000_000_000
+            return {'stat': signature, 'children': sorted(children), 'depfiles': sorted(files),
+                    'timestamp_stable': stable}
+        if (attempt == 2 or not stat_module.S_ISDIR(after.st_mode)
+                or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)):
+            raise RuntimeError(f'Output directory changed while collecting depfiles: {path}')
+        # Do not reuse any names from the raced listing.
+        before, signature = after, current
+
+
 def depfile_inventory(build, previous=None, local=False, directory_index=None):
     """Rescan changed directories; stat checks preserve discovery of added files."""
     excluded = {'.cache', 'lsp-portable', '.clangd-lsp-work', '.git', '.incremental'}
@@ -1015,21 +1040,7 @@ def depfile_inventory(build, previous=None, local=False, directory_index=None):
                     record = cached
                     reused += 1
                 else:
-                    children, files = [], []
-                    with os.scandir(path) as entries:
-                        for entry in entries:
-                            if entry.name in excluded:
-                                continue
-                            if entry.is_dir(follow_symlinks=False):
-                                children.append(entry.name)
-                            elif entry.name.endswith('.d') and entry.is_file():
-                                files.append(entry.name)
-                    after = os.stat(path, follow_symlinks=name == '.')
-                    if file_signature(after) + [after.st_nlink] != signature:
-                        raise RuntimeError(f'Output directory changed while collecting depfiles: {path}')
-                    stable = max(before.st_mtime_ns, before.st_ctime_ns) < time.time_ns() - 2_000_000_000
-                    record = {'stat': signature, 'children': sorted(children), 'depfiles': sorted(files),
-                              'timestamp_stable': stable}
+                    record = read_stable_depfile_directory(path, before, signature, excluded, name == '.')
             scanned += 1
             if pool is not None:
                 observed.append((name, record['stat']))

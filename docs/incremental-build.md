@@ -203,6 +203,11 @@ does not modify or flash device software. External build environments and
 shared services still need to be managed separately. Concurrent builds of
 the very same physical out/ directory are not supported.
 
+If directory metadata changes during depfile discovery, collection discards
+that listing and fully enumerates the directory again, for at most three
+attempts. A replaced directory or continuous mutation still stops collection.
+Unchanged directories keep the existing metadata checks and cache reuse.
+
 ## Reusing baseline collection indexes
 
 Successful enabled target builds retain an internal index at
