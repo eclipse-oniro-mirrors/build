@@ -979,7 +979,7 @@ def checked_directory_changes(pool, build, entries, workers):
 
 def read_stable_depfile_directory(path, before, signature, excluded, follow_root):
     """Rescan a raced listing, keeping identity and bounded-stability checks."""
-    for attempt in range(3):
+    for _ in range(3):
         children, files = [], []
         with os.scandir(path) as entries:
             for entry in entries:
@@ -995,11 +995,12 @@ def read_stable_depfile_directory(path, before, signature, excluded, follow_root
             stable = max(before.st_mtime_ns, before.st_ctime_ns) < time.time_ns() - 2_000_000_000
             return {'stat': signature, 'children': sorted(children), 'depfiles': sorted(files),
                     'timestamp_stable': stable}
-        if (attempt == 2 or not stat_module.S_ISDIR(after.st_mode)
+        if (not stat_module.S_ISDIR(after.st_mode)
                 or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)):
             raise RuntimeError(f'Output directory changed while collecting depfiles: {path}')
         # Do not reuse any names from the raced listing.
         before, signature = after, current
+    raise RuntimeError(f'Output directory changed while collecting depfiles: {path}')
 
 
 def depfile_inventory(build, previous=None, local=False, directory_index=None):
