@@ -76,30 +76,41 @@ post-build analysis, not the compiler's dependency tracking.
 
 Before the preloader, loader or GN can rewrite imported build metadata, the
 entry script first reads the product feature. Only enabled products check their
-actual output folder/incremental_workspace.json (see Product opt-in below). A successful explicit
-make_all records source input digests, nanosecond timestamps, executable bits,
-tool identities, the original logical root and build time. Unchanged builds
-refresh that record without collecting all Ninja inputs again. HB waits for the
-baseline subprocess immediately after successful target compilation and before
-post-target OSKM/LSP collection. The baseline does not require LSP to run, and a
-failed baseline seal fails the build instead of leaving background work after
-the entry script exits. The `incremental workspace:` messages report this
-bookkeeping. Single-target
-builds retain their requested targets and do not replace the full baseline.
+actual output folder/incremental_workspace.json (see Product opt-in below).
+Every successful Ninja target build records source input digests, nanosecond
+timestamps, executable bits, tool identities, the original logical root and
+build time. This includes a first build without out/, the default `images`,
+explicit `make_all`, component targets and multiple targets. Generate-only,
+dry-run and failed builds do not publish a successful baseline.
 
-Successful full-product seals also atomically acknowledge the exact manifest
-in `<actual product output>/incremental_workspace.restore-state.json`. The restore key includes the
-manifest content hash, host boot identity, root device/inode and physical path.
-Normal successful refreshes update this key, so the next build in the same
-physical workspace does not hash all transferred inputs again. A rename, copy,
-host change or imported manifest still triggers a conservative first check,
-including source changes that preserved their old modification times. Existing
-state without the physical-path field is checked once after upgrading.
+HB waits synchronously for baseline collection at the end of the successful
+build, after post-target OSKM/LSP, post-build work, monitoring and configuration
+cache finalization. LSP need not be enabled. HB returns to build.sh only after
+the manifest and incremental_workspace.restore-state.json are written; a seal
+failure fails the build. No baseline worker is detached after build.sh exits.
+
+The manifest and collection index retain the actual completed target(s). A
+change of target rediscovers the active inventory. Inputs from prior builds
+outside that inventory retain their earlier fingerprints, so module increments
+do not discard the product's known inputs or accept unbuilt edits elsewhere.
+Retained inputs with changed metadata remain pending; the next local entry
+checks those inputs so an edit with a preserved old mtime cannot evade Ninja.
+The next build still uses the requested Ninja targets; no module is promoted
+to make_all. The `incremental workspace:` messages report this bookkeeping.
+
+Successful seals atomically replace each JSON and acknowledge the exact
+manifest hash in `<actual product output>/incremental_workspace.restore-state.json`.
+The restore key includes host boot identity, root device/inode and physical path.
+Normal successful refreshes update this key. A rename, copy, host change or
+imported manifest triggers a conservative first check, including source changes
+that preserved their old modification times. Existing state without the
+physical-path field is checked once after upgrading.
 
 The normal mapped build entry validates each distinct tool file once; aliases
 share a digest only within that validation call. Direct restore still validates
 tools. Failed/interrupted builds do not acknowledge a new successful baseline.
-A restore-cache write failure warns and retains the conservative recheck path.
+A final baseline acknowledgment failure fails the build. Other restore-cache
+write failures warn and retain the conservative recheck path.
 
 Entry logs distinguish mountpoint preparation, mapped-root readiness, tool
 validation and input restore/skip. Full capture logs report its decision reason,
@@ -177,7 +188,8 @@ Deleting out keeps the ordinary clean-build path and creates no namespace.
 Prebuilt inputs outside out must still be prepared with the project downloader;
 for example JSVM requires its pinned V8 library and headers under vendor/.
 Toolchain changes are rejected instead of silently reusing incompatible output.
-Only the explicitly requested make_all captures a complete successful baseline.
+A successful module baseline covers that module and retains earlier known
+inputs; it does not claim that other product targets have completed.
 
 The mechanism does not rewrite compiler commands, Ninja command hashes,
 binary dependency databases, public GN defaults or __FILE__ expansion. It
@@ -187,7 +199,7 @@ the very same physical out/ directory are not supported.
 
 ## Reusing baseline collection indexes
 
-Successful enabled `make_all` builds retain an internal index at
+Successful enabled target builds retain an internal index at
 `<actual product output>/.incremental/collection.json`. The manifest binds its
 schema, generation and content digest to the selected product. Missing, corrupt
 or incompatible indexes fall back to a complete capture; downloaded tools and
@@ -353,8 +365,8 @@ or delete it. An enabled external output must be inside the transferred tree.
 
 After changing the feature or selected product, first run without
 `--fast-rebuild`. Later normal and fast source increments keep their usual
-semantics; a single target never promotes itself to make_all or captures a new
-complete baseline. Explicit `--product-name` is required for automatic workspace
+semantics; a single target records its actual inputs and never promotes itself
+to make_all. Explicit `--product-name` is required for automatic workspace
 reuse; menu/direct HB calls keep their normal build behavior.
 
 Regression tests are maintained in the personal repository, outside this PR:
