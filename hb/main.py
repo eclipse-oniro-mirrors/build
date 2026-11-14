@@ -138,7 +138,7 @@ class Main():
         module = module_initializers[module_type]()
         try:
             module.run()
-            if module_type == 'build':
+            if module_type == 'build' and not isinstance(module, OHOSBuildModule):
                 LogUtil.hb_info('Cost Time:  {}'.format(SystemUtil.get_current_time() - start_time))
         except KeyboardInterrupt:
             for file in os.listdir(ARGS_DIR):

@@ -78,11 +78,12 @@ class OHOSBuildModule(BuildModuleInterface):
             monitor.run()
             if self._configuration_cache is not None:
                 self._configuration_cache.commit()
-            # All build/post-build collectors have returned. Wait for the seal
-            # before HB returns to build.sh and the CI worker can be released.
-            self._record_incremental_baseline()
             LogUtil.hb_info('{} build success'.format(
                 self.args_dict.get('product_name').arg_value))
+            LogUtil.hb_info('Cost Time:  {}'.format(self.build_time))
+            # Report artifact completion before recording the workspace baseline.
+            # Still wait for the seal before HB returns to build.sh and CI exits.
+            self._record_incremental_baseline()
 
     def _prebuild(self):
         self._run_phase(BuildPhase.PRE_BUILD)

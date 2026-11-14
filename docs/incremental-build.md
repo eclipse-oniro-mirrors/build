@@ -191,6 +191,12 @@ Toolchain changes are rejected instead of silently reusing incompatible output.
 A successful module baseline covers that module and retains earlier known
 inputs; it does not claim that other product targets have completed.
 
+HB reports the product's `build success` and `Cost Time` when artifact build
+and post-build steps have completed, before recording the workspace baseline.
+That duration excludes baseline finalization. HB still waits synchronously for
+the baseline to finish before returning to `build.sh`; a baseline failure makes
+the command fail even after the artifact-completion messages were printed.
+
 The mechanism does not rewrite compiler commands, Ninja command hashes,
 binary dependency databases, public GN defaults or __FILE__ expansion. It
 does not modify or flash device software. External build environments and
