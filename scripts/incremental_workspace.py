@@ -400,14 +400,15 @@ def _finish_build(root, arguments):
     destination = root / MANIFEST
     target = request.build_target[0] if len(request.build_target) == 1 else request.build_target
     previous = read_build_baseline(root)
-    # A target switch needs a fresh active inventory. Keep earlier fingerprints
-    # for inputs outside this build so a module increment never shrinks coverage.
-    same_target = previous is not None and previous.get('target') == target
+    # Target-specific paths must be refreshed on a goal switch, but graph,
+    # depfile and fingerprint caches remain usable after their normal checks.
+    same_target = (previous is not None
+                   and target_key(previous.get('target')) == target_key(target))
     if previous is not None and not same_target:
-        phase(f'baseline target changed: {previous.get("target")} -> {target}')
-    cache = load_collection_cache(root, build, previous) if same_target else None
+        phase(f'baseline target scope changed: {previous.get("target")} -> {target}; checking reusable collection cache')
+    cache = load_collection_cache(root, build, previous)
     if cache is not None:
-        if refresh_unchanged_index(root, build, previous, cache):
+        if same_target and refresh_unchanged_index(root, build, previous, cache):
             acknowledge_successful_baseline(root, previous)
             phase('successful baseline refreshed (unchanged indexed inputs)', started)
             return
@@ -562,6 +563,15 @@ def baseline_targets(target):
     return [target] if isinstance(target, str) else list(target)
 
 
+def target_key(target):
+    """Compare goal sets without changing the order passed to Ninja."""
+    if isinstance(target, str) and target:
+        return (target,)
+    if isinstance(target, list) and all(isinstance(name, str) and name for name in target):
+        return tuple(sorted(set(target)))
+    return ()
+
+
 def audit(root, build, target):
     p = subprocess.run(ninja_command(root, build, '-n', '-d', 'explain', *baseline_targets(target)),
                        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -630,7 +640,7 @@ def depfile_rules(text):
 
 
 # The collection cache is optional acceleration, committed by generation only
-# after a successful complete product build. It never participates in restore.
+# after a successful target build. It never participates in restore.
 COLLECTION_VERSION = 2
 DEPFILE_CACHE_FORMAT = 1
 PARSED_DEPFILE_CACHE_BYTES = 64 * 1024 * 1024
@@ -682,8 +692,8 @@ def load_collection_cache(root, build, previous):
             or data.get('generation') != previous.get('collection_generation')
             or data.get('canonical_root') != str(root)
             or data.get('build_dir') != str(build.relative_to(root))
-            or not previous.get('target')
-            or data.get('target') != previous.get('target')):
+            or not target_key(previous.get('target'))
+            or target_key(data.get('target')) != target_key(previous.get('target'))):
         return None
     if data.get('ninja_sha256') != digest(Path(ninja_command(root, build)[0])):
         return None
@@ -1436,6 +1446,7 @@ def ninja_deps_index_context(root, build, graph):
 
 def collect_capture_inventory(root, build, target, cache, local, deps_metadata=None):
     """Collect paths using a graph-bound output index when its membership is known."""
+    same_scope = bool(cache and target_key(cache.get('target')) == target_key(target))
     deps_path = build / '.ninja_deps'
     deps_signature = ninja_deps_signature(build)
     deps_digest = digest(deps_path) if deps_signature is not None else None
@@ -1443,14 +1454,14 @@ def collect_capture_inventory(root, build, target, cache, local, deps_metadata=N
     same_deps = bool(cache and cache.get('deps_sha256') == deps_digest)
     previous_content = cache.get('deps_content_sha256') if cache else None
     valid_content = isinstance(previous_content, str) and re.fullmatch('[0-9a-f]{64}', previous_content)
-    previous_index = cache.get('deps_outputs_index') if cache else None
+    previous_index = cache.get('deps_outputs_index') if same_scope else None
     directories, snapshot_state, query_metadata = {}, {}, {}
     outputs_index, indexed_candidate, used_index = None, None, False
     workers = min(3, capture_worker_count())
     graph_started = time.perf_counter()
     scope_task = None
     def scoped_inputs():
-        if cache and same_graph_content(cache.get('graph'), graph_task.result()):
+        if same_scope and same_graph_content(cache.get('graph'), graph_task.result()):
             return set(cache['ninja_inputs'])
         return collect_ninja_paths(root, build, 'inputs', target)
     def query_deps():
@@ -1469,7 +1480,8 @@ def collect_capture_inventory(root, build, target, cache, local, deps_metadata=N
         identity_task = (pool.submit(ninja_deps_content_identity, deps_path, deps_digest,
                                      snapshot_result=snapshot_state)
                          if deps_digest is not None and (not same_deps or not valid_content) else None)
-        deps_task = None if same_deps or (local and valid_content) else pool.submit(query_deps)
+        deps_task = (None if same_scope and (same_deps or (local and valid_content))
+                     else pool.submit(query_deps))
         content_identity = (identity_task.result() if identity_task else
                             previous_content if deps_digest is not None and same_deps else None)
         if (not same_deps and local and content_identity != previous_content
@@ -1482,13 +1494,13 @@ def collect_capture_inventory(root, build, target, cache, local, deps_metadata=N
         graph = graph_task.result()
         same_graph = bool(cache and same_graph_content(cache.get('graph'), graph))
         phase(f'complete Ninja graph checked files={len(graph or {})} same_content={same_graph}', graph_started)
-        if (not same_deps and local and same_graph and valid_content
+        if (same_scope and not same_deps and local and same_graph and valid_content
                 and content_identity is not None and content_identity == previous_content):
             same_deps = True
             phase('Ninja deps content unchanged; reusing dependency paths')
         inputs_task = (pool.submit(collect_ninja_paths, root, build, 'inputs', target)
-                       if not same_graph and scope_task is None else None)
-        if same_graph and same_deps:
+                       if not (same_scope and same_graph) and scope_task is None else None)
+        if same_scope and same_graph and same_deps:
             deps = set(cache['ninja_deps'])
             outputs_index = previous_index if local else None
         elif same_graph and indexed_candidate is not None:
@@ -1509,14 +1521,15 @@ def collect_capture_inventory(root, build, target, cache, local, deps_metadata=N
                 context = ninja_deps_index_context(root, build, graph)
                 outputs_index = make_ninja_deps_outputs(
                     snapshot_state, query_metadata['live_outputs'], deps, context)
-        inputs = (set(cache['ninja_inputs']) if same_graph else
+        inputs = (set(cache['ninja_inputs']) if same_scope and same_graph else
                   scope_task.result() if scope_task is not None else inputs_task.result())
         inventory = inventory_task.result()
         # Do not retain the large binary log through input fingerprinting.
         snapshot_state.clear()
         query_metadata.clear()
     check_ninja_deps_snapshot(build, deps_signature)
-    phase(f'Ninja inventory reused inputs={same_graph} deps={same_graph and same_deps} indexed={used_index}')
+    phase(f'Ninja inventory reused inputs={same_scope and same_graph} '
+          f'deps={same_scope and same_graph and same_deps} indexed={used_index}')
     if deps_metadata is not None:
         deps_metadata.update(content_identity=content_identity, log_signature=deps_signature,
                              outputs_index=outputs_index, used_outputs_index=used_index)
@@ -1531,9 +1544,12 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
     # copy, host change or independent checkout still has a different identity.
     local = bool(cache and all(cache.get('instance', {}).get(key) == value
                                for key, value in instance.items()))
+    same_scope = bool(cache and target_key(cache.get('target')) == target_key(target))
     if cache and allow_dirty:
-        count = previous.get('baseline_planned') if previous else None
-        phase(f'Ninja audit skipped: successful {target}; previous diagnostic count retained')
+        count = previous.get('baseline_planned') if same_scope and previous else None
+        diagnostic = ('previous diagnostic count retained' if same_scope
+                      else 'diagnostic count unavailable after target change')
+        phase(f'Ninja audit skipped: successful {target}; {diagnostic}')
     else:
         phase('auditing Ninja baseline')
         audit_started = time.perf_counter()
@@ -1612,6 +1628,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
         collection['deps_outputs_index'] = deps_metadata['outputs_index']
     cache_started = time.perf_counter()
     unchanged_index = (local and same_graph and same_deps
+                       and same_scope
                        and 'deps_content_sha256' in cache
                        and cache.get('deps_sha256') == deps_digest
                        and cache.get('deps_content_sha256') == deps_metadata['content_identity']
@@ -1634,7 +1651,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
     data['collection_generation'] = generation
     data['collection_sha256'] = (previous['collection_sha256'] if unchanged_index
                                  else digest(collection_cache_path(root, build)))
-    data['baseline_planned_reused'] = bool(cache and allow_dirty)
+    data['baseline_planned_reused'] = bool(same_scope and allow_dirty)
     phase('collection index ready', cache_started)
     destination = root / (manifest or MANIFEST)
     save_started = time.perf_counter()

@@ -237,6 +237,15 @@ Across copies or hosts, entry-verified fingerprints are valid only for the same
 build invocation; subsequent changes still require hashing. Journals are removed
 after finishing, and each product uses its actual output directory.
 
+Changing the requested targets keeps the validated graph, directory, parsed
+depfile and source-fingerprint caches. Only the target-specific Ninja input and
+dependency lists and their retained closure are rediscovered. An expanded target
+therefore collects its newly reachable inputs; a narrower module build retains
+earlier coverage without acknowledging unbuilt edits outside that module.
+Reordering or repeating the same targets uses the unchanged-target fast path.
+This applies to the default image build, explicit `make_all` and module builds;
+it does not equate their artifact scopes or change the targets passed to Ninja.
+
 Directory checks run in bounded thread batches. Dependency database records that
 only change output timestamps reuse their dependency paths after checking the
 database's content identity. This keeps ordinary source-only edits from requiring
