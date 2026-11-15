@@ -80,6 +80,10 @@ class OHOSBuildModule(BuildModuleInterface):
                 self._configuration_cache.commit()
             LogUtil.hb_info('{} build success'.format(
                 self.args_dict.get('product_name').arg_value))
+            LogUtil.hb_info('Cost Time:  {}'.format(self.build_time))
+            # Report artifact completion before recording the workspace baseline.
+            # Still wait for the seal before HB returns to build.sh and CI exits.
+            self._record_incremental_baseline()
 
     def _prebuild(self):
         self._run_phase(BuildPhase.PRE_BUILD)
@@ -159,36 +163,43 @@ class OHOSBuildModule(BuildModuleInterface):
         args_key="args_dict",
     )
     def _post_target_compilation(self):
-        self._record_incremental_baseline()
         self._run_phase(BuildPhase.POST_TARGET_COMPILATION)
 
     def _record_incremental_baseline(self):
-        # Seal the successful Ninja build before optional OSKM/LSP collection.
-        # A partial build must never replace the transferable make_all baseline.
-        if (self.args_dict['build_target'].arg_value != ['make_all']
+        # Use the targets actually passed to Ninja: an empty CLI target at the
+        # source root resolves to images, not make_all. Successful component
+        # builds also seal their own inputs without claiming a full-product build.
+        targets = self.target_compiler.args_dict.get('build_target', [])
+        ninja_args = self.target_compiler.args_dict.get('ninja_args', [])
+        if (not targets or any(target.startswith('-') for target in targets)
+                or any(arg in ('--dry-run', '-h', '--help', '--version')
+                       or arg.startswith(('-n', '-t'))
+                       for arg in ninja_args)
                 or self.args_dict['build_only_load'].arg_value
                 or self.args_dict['build_only_gn'].arg_value):
             return
         from resources.global_var import CURRENT_OHOS_ROOT
         from scripts.incremental_product_policy import resolve
 
-        arguments = sys.argv[2:]
-        if not resolve(CURRENT_OHOS_ROOT, arguments)['enabled']:
+        policy = resolve(CURRENT_OHOS_ROOT, sys.argv[2:])
+        if not policy['enabled']:
             return
-        # HB can select make_all without an explicit CLI target. Pass the
-        # resolved full-product target to finish, whose parser has no HB defaults.
-        if not any(argument == '--build-target' or argument.startswith('--build-target=')
-                   for argument in arguments):
-            arguments = [*arguments, '--build-target', 'make_all']
+        # finish consumes only the successful product/target. Do not reinterpret
+        # CLI defaults, short options or multi-value target syntax in its parser.
+        arguments = ['--product-name', policy['product'] + '@' + policy['company']]
+        for target in targets:
+            arguments.extend(['--build-target', target])
         command = [sys.executable,
                    os.path.join(CURRENT_OHOS_ROOT, 'build/scripts/incremental_workspace.py'),
                    '--root', CURRENT_OHOS_ROOT, 'finish', '--', *arguments]
+        LogUtil.hb_info('Incremental workspace baseline started: {}'.format(', '.join(targets)))
         try:
             result = subprocess.run(command)
         except OSError as error:
             raise OHOSException(f'Cannot record the relocatable baseline: {error}', '4000') from error
         if result.returncode:
             raise OHOSException('Build completed but recording the relocatable baseline failed.', '4000')
+        LogUtil.hb_info('Incremental workspace baseline complete; returning to build.sh')
 
     def _post_build(self):
         self._run_phase(BuildPhase.POST_BUILD)

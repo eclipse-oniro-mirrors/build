@@ -243,6 +243,11 @@ def prepare_build(root, arguments):
         return
     if (data.get('automatic') and Path(data['canonical_root']) == root
             and data.get('origin_instance') == instance_identity(root)):
+        pending = data.get('pending_retained_inputs', [])
+        if pending:
+            # A module build cannot acknowledge an unbuilt edit elsewhere.
+            # Check just those retained inputs before the next local Ninja run.
+            restore(root, dict(data, files={name: data['files'][name] for name in pending}))
         print(f'incremental workspace: in-place build at {root}', flush=True)
         return  # Ordinary in-place build keeps its existing build-time behavior.
     enter(root, data, ['bash', './build.sh', *arguments])
@@ -280,7 +285,12 @@ def refresh_unchanged_index(root, build, previous, cache):
     if previous.get('graph_identity', {}).get('args') != identity.get('args'):
         return False
     try:
-        for name, record in previous['files'].items():
+        records = previous['files'].items()
+        if previous.get('pending_retained_inputs'):
+            pending = set(previous['pending_retained_inputs'])
+            # Preserve these old fingerprints until their own targets build.
+            records = ((name, record) for name, record in records if name not in pending)
+        for name, record in records:
             if file_signature(os.stat(os.path.join(root, name))) != record.get('stat'):
                 return False
         for name, record in cache['graph'].items():
@@ -316,6 +326,8 @@ def refresh_unchanged_index(root, build, previous, cache):
             for _, values in depfile_rules(depfile.read_text()):
                 paths.update(values)
         files = fingerprint_inputs(root, build, paths, previous['files'], local=True)
+        if previous.get('retained_input_count'):
+            files = {**previous['files'], **files}
         if files != previous['files'] or tool_identities(root) != previous.get('tools'):
             return False
     except (FileNotFoundError, NotADirectoryError):
@@ -379,29 +391,37 @@ def _finish_build(root, arguments):
     started = time.perf_counter()
     request = build_request(arguments)
     if (not request.product_name or request.build_only_gn or request.build_only_load
-            or request.build_target != ['make_all']):
+            or not request.build_target
+            or any(target.startswith('-') for target in request.build_target)):
         return
     build = request_build_dir(root, request)
     if not (build / 'build.ninja').is_file():
-        return
+        raise RuntimeError('Cannot seal successful build: build.ninja is missing')
     destination = root / MANIFEST
+    target = request.build_target[0] if len(request.build_target) == 1 else request.build_target
     previous = read_build_baseline(root)
+    # Target-specific paths must be refreshed on a goal switch, but graph,
+    # depfile and fingerprint caches remain usable after their normal checks.
+    same_target = (previous is not None
+                   and target_key(previous.get('target')) == target_key(target))
+    if previous is not None and not same_target:
+        phase(f'baseline target scope changed: {previous.get("target")} -> {target}; checking reusable collection cache')
     cache = load_collection_cache(root, build, previous)
     if cache is not None:
-        if refresh_unchanged_index(root, build, previous, cache):
-            acknowledge_successful_baseline(root)
+        if same_target and refresh_unchanged_index(root, build, previous, cache):
+            acknowledge_successful_baseline(root, previous)
             phase('successful baseline refreshed (unchanged indexed inputs)', started)
             return
         phase('refreshing indexed successful build baseline')
-        capture(root, build, 'make_all', True, automatic=bool(previous.get('automatic')),
-                previous=previous, cache=cache)
-        acknowledge_successful_baseline(root)
+        sealed = capture(root, build, target, True, automatic=bool(previous.get('automatic')),
+                         previous=previous, cache=cache)
+        acknowledge_successful_baseline(root, sealed)
         phase('successful indexed baseline refreshed', started)
         return
-    if previous and previous.get('collection_generation'):
+    if same_target and previous.get('collection_generation'):
         phase('full baseline capture reason=collection-cache-missing-or-invalid')
-        capture(root, build, 'make_all', True, automatic=bool(previous.get('automatic')), previous=previous)
-        acknowledge_successful_baseline(root)
+        sealed = capture(root, build, target, True, automatic=bool(previous.get('automatic')), previous=previous)
+        acknowledge_successful_baseline(root, sealed)
         return
     identity = graph_identity(build)
     previous_graph = previous.get('graph_identity', {}) if previous else {}
@@ -415,7 +435,7 @@ def _finish_build(root, arguments):
             and previous_graph.get('.ninja_deps') == identity.get('.ninja_deps')
             and only_optional_probe_executed(build)):
         same_graph = True
-    if (previous and previous.get('canonical_root') == str(root)
+    if (same_target and previous.get('canonical_root') == str(root)
             and previous.get('build_dir') == str(build.relative_to(root))
             and same_graph and complete_inputs):
         unchanged = True
@@ -451,7 +471,7 @@ def _finish_build(root, arguments):
                 match = re.search(r'^' + name + r'\s*=\s*(.*)$', args, re.M)
                 previous[field] = match[1].strip('"') if match else ''
             write_manifest(destination, previous)
-            acknowledge_successful_baseline(root)
+            acknowledge_successful_baseline(root, previous)
             phase('successful baseline refreshed (unchanged inputs)', started)
             return
     if previous is not None:
@@ -467,8 +487,8 @@ def _finish_build(root, arguments):
             reason = 'ninja-dependencies-changed'
     phase(f'full baseline capture reason={reason}')
     automatic = bool(previous.get('automatic')) if previous else True
-    capture(root, build, 'make_all', True, automatic=automatic)
-    acknowledge_successful_baseline(root)
+    sealed = capture(root, build, target, True, automatic=automatic, previous=previous)
+    acknowledge_successful_baseline(root, sealed)
     phase('successful baseline recorded', started)
 
 
@@ -539,8 +559,21 @@ def ninja_command(root, build, *args):
             '-C', str(build), '-w', 'dupbuild=warn', *args]
 
 
+def baseline_targets(target):
+    return [target] if isinstance(target, str) else list(target)
+
+
+def target_key(target):
+    """Compare goal sets without changing the order passed to Ninja."""
+    if isinstance(target, str) and target:
+        return (target,)
+    if isinstance(target, list) and all(isinstance(name, str) and name for name in target):
+        return tuple(sorted(set(target)))
+    return ()
+
+
 def audit(root, build, target):
-    p = subprocess.run(ninja_command(root, build, '-n', '-d', 'explain', target),
+    p = subprocess.run(ninja_command(root, build, '-n', '-d', 'explain', *baseline_targets(target)),
                        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     steps = re.findall(r'^\[(\d+)/(\d+)\] (\S+)', p.stdout, re.M)
     return p.returncode, len(steps), p.stdout
@@ -607,7 +640,7 @@ def depfile_rules(text):
 
 
 # The collection cache is optional acceleration, committed by generation only
-# after a successful complete product build. It never participates in restore.
+# after a successful target build. It never participates in restore.
 COLLECTION_VERSION = 2
 DEPFILE_CACHE_FORMAT = 1
 PARSED_DEPFILE_CACHE_BYTES = 64 * 1024 * 1024
@@ -659,7 +692,8 @@ def load_collection_cache(root, build, previous):
             or data.get('generation') != previous.get('collection_generation')
             or data.get('canonical_root') != str(root)
             or data.get('build_dir') != str(build.relative_to(root))
-            or data.get('target') != 'make_all' or previous.get('target') != 'make_all'):
+            or not target_key(previous.get('target'))
+            or target_key(data.get('target')) != target_key(previous.get('target'))):
         return None
     if data.get('ninja_sha256') != digest(Path(ninja_command(root, build)[0])):
         return None
@@ -747,16 +781,16 @@ def same_graph_content(old, new):
             and all(old[name]['sha256'] == record['sha256'] for name, record in new.items()))
 
 
-def collect_ninja_paths(root, build, tool, target='make_all', *, deps_metadata=None):
+def collect_ninja_paths(root, build, tool, target='make_all', *, deps_metadata=None, reachable=None):
     started = time.perf_counter()
     phase(f'collecting Ninja {tool}')
     if tool == 'deps' and deps_metadata is not None:
-        paths, live = collect_ninja_deps_with_outputs(root, build)
+        paths, live = collect_ninja_deps_with_outputs(root, build, reachable=reachable)
         deps_metadata['live_outputs'] = live
     else:
         paths = set()
         command = ninja_command(root, build, '-n', '-t', tool,
-                                *(['-E', target] if tool == 'inputs' else []))
+                                *(['-E', *baseline_targets(target)] if tool == 'inputs' else []))
         with subprocess.Popen(command, text=True, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL) as process:
             for line in process.stdout:
@@ -953,6 +987,32 @@ def checked_directory_changes(pool, build, entries, workers):
     return changed
 
 
+def read_stable_depfile_directory(path, before, signature, excluded, follow_root):
+    """Rescan a raced listing, keeping identity and bounded-stability checks."""
+    for _ in range(3):
+        children, files = [], []
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if entry.name in excluded:
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    children.append(entry.name)
+                elif entry.name.endswith('.d') and entry.is_file():
+                    files.append(entry.name)
+        after = os.stat(path, follow_symlinks=follow_root)
+        current = file_signature(after) + [after.st_nlink]
+        if current == signature:
+            stable = max(before.st_mtime_ns, before.st_ctime_ns) < time.time_ns() - 2_000_000_000
+            return {'stat': signature, 'children': sorted(children), 'depfiles': sorted(files),
+                    'timestamp_stable': stable}
+        if (not stat_module.S_ISDIR(after.st_mode)
+                or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)):
+            raise RuntimeError(f'Output directory changed while collecting depfiles: {path}')
+        # Do not reuse any names from the raced listing.
+        before, signature = after, current
+    raise RuntimeError(f'Output directory changed while collecting depfiles: {path}')
+
+
 def depfile_inventory(build, previous=None, local=False, directory_index=None):
     """Rescan changed directories; stat checks preserve discovery of added files."""
     excluded = {'.cache', 'lsp-portable', '.clangd-lsp-work', '.git', '.incremental'}
@@ -991,21 +1051,7 @@ def depfile_inventory(build, previous=None, local=False, directory_index=None):
                     record = cached
                     reused += 1
                 else:
-                    children, files = [], []
-                    with os.scandir(path) as entries:
-                        for entry in entries:
-                            if entry.name in excluded:
-                                continue
-                            if entry.is_dir(follow_symlinks=False):
-                                children.append(entry.name)
-                            elif entry.name.endswith('.d') and entry.is_file():
-                                files.append(entry.name)
-                    after = os.stat(path, follow_symlinks=name == '.')
-                    if file_signature(after) + [after.st_nlink] != signature:
-                        raise RuntimeError(f'Output directory changed while collecting depfiles: {path}')
-                    stable = max(before.st_mtime_ns, before.st_ctime_ns) < time.time_ns() - 2_000_000_000
-                    record = {'stat': signature, 'children': sorted(children), 'depfiles': sorted(files),
-                              'timestamp_stable': stable}
+                    record = read_stable_depfile_directory(path, before, signature, excluded, name == '.')
             scanned += 1
             if pool is not None:
                 observed.append((name, record['stat']))
@@ -1045,7 +1091,7 @@ def collect_retained_depfiles(build, paths, target, *, previous=None, local=Fals
             absolute_paths[value] = os.path.normpath(os.path.join(build_base, value))
         return absolute_paths[value]
     initial_paths = paths.copy()
-    base_digest = hashlib.sha256('\0'.join(sorted(paths | {target})).encode()).hexdigest()
+    base_digest = hashlib.sha256('\0'.join(sorted(paths | set(baseline_targets(target)))).encode()).hexdigest()
     # A fully reused closure needs no absolute-path discovery set.
     known = None
     records = {}
@@ -1063,7 +1109,7 @@ def collect_retained_depfiles(build, paths, target, *, previous=None, local=Fals
         # Changes outside the old reachable closure cannot affect it unless a
         # new/changed producer now supplies a path in that closure.
         retained_names = set(closure['retained'])
-        known = {absolute(path) for path in paths | {target}}
+        known = {absolute(path) for path in paths | set(baseline_targets(target))}
         known_closure = known | {absolute(value) for value in closure['extra_inputs']}
         same_inventory = (
             retained_names.issubset(parsed)
@@ -1082,7 +1128,7 @@ def collect_retained_depfiles(build, paths, target, *, previous=None, local=Fals
         phase(f'retained closure reused files={len(records)}')
     else:
         if known is None:
-            known = {absolute(path) for path in paths | {target}}
+            known = {absolute(path) for path in paths | set(baseline_targets(target))}
         pending, loaded = deque(known), set()
         while pending:
             for relative in producers.get(pending.popleft(), ()):
@@ -1257,16 +1303,17 @@ def read_ninja_deps_snapshot(path, expected_digest):
             'identity': identity.hexdigest(), 'signature': signature}
 
 
-def collect_ninja_deps_with_outputs(root, build):
+def collect_ninja_deps_with_outputs(root, build, *, reachable=None):
     """Obtain liveness from Ninja, validating the complete output block stream."""
     import re
     header = re.compile(r'(.+): #deps ([0-9]+), deps mtime -?[0-9]+ \((?:STALE|VALID)\)')
     paths, live, remaining, valid = set(), {}, 0, True
+    selected, seen = reachable is None, set()
     command = ninja_command(root, build, '-n', '-t', 'deps')
     with subprocess.Popen(command, text=True, stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL) as process:
         for line in process.stdout:
-            if line.startswith('    '):
+            if selected and line.startswith('    '):
                 paths.add(line.strip())
             if not valid:
                 continue
@@ -1280,8 +1327,11 @@ def collect_ninja_deps_with_outputs(root, build):
             if not value:
                 continue
             match = header.fullmatch(value)
-            if match and not line.startswith('    ') and match[1] not in live:
-                live[match[1]] = int(match[2])
+            if match and not line.startswith('    ') and match[1] not in seen:
+                seen.add(match[1])
+                selected = reachable is None or match[1] in reachable
+                if selected:
+                    live[match[1]] = int(match[2])
                 remaining = int(match[2])
             elif (value.endswith(': deps not found') and not line.startswith('    ')):
                 continue
@@ -1289,6 +1339,8 @@ def collect_ninja_deps_with_outputs(root, build):
                 valid = False
         if process.wait():
             raise RuntimeError('Ninja deps query failed')
+    if reachable is not None and (not valid or remaining):
+        raise RuntimeError('Cannot safely scope Ninja dependencies to the completed targets')
     return paths, live if valid and remaining == 0 else None
 
 
@@ -1394,6 +1446,7 @@ def ninja_deps_index_context(root, build, graph):
 
 def collect_capture_inventory(root, build, target, cache, local, deps_metadata=None):
     """Collect paths using a graph-bound output index when its membership is known."""
+    same_scope = bool(cache and target_key(cache.get('target')) == target_key(target))
     deps_path = build / '.ninja_deps'
     deps_signature = ninja_deps_signature(build)
     deps_digest = digest(deps_path) if deps_signature is not None else None
@@ -1401,23 +1454,34 @@ def collect_capture_inventory(root, build, target, cache, local, deps_metadata=N
     same_deps = bool(cache and cache.get('deps_sha256') == deps_digest)
     previous_content = cache.get('deps_content_sha256') if cache else None
     valid_content = isinstance(previous_content, str) and re.fullmatch('[0-9a-f]{64}', previous_content)
-    previous_index = cache.get('deps_outputs_index') if cache else None
+    previous_index = cache.get('deps_outputs_index') if same_scope else None
     directories, snapshot_state, query_metadata = {}, {}, {}
     outputs_index, indexed_candidate, used_index = None, None, False
     workers = min(3, capture_worker_count())
     graph_started = time.perf_counter()
+    scope_task = None
+    def scoped_inputs():
+        if same_scope and same_graph_content(cache.get('graph'), graph_task.result()):
+            return set(cache['ninja_inputs'])
+        return collect_ninja_paths(root, build, 'inputs', target)
     def query_deps():
-        return collect_ninja_paths(root, build, 'deps', target, deps_metadata=query_metadata)
+        # Ninja's deps log is global. Scope it to this target's reachable outputs
+        # without rerunning the inputs query when the graph content is unchanged.
+        reachable = scope_task.result() | set(baseline_targets(target)) if scope_task else None
+        return collect_ninja_paths(root, build, 'deps', target,
+                                   deps_metadata=query_metadata, reachable=reachable)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         graph_task = pool.submit(graph_content_records, root, build,
                                  cache.get('graph') if cache else None, local)
+        scope_task = pool.submit(scoped_inputs) if target != 'make_all' else None
         inventory_task = pool.submit(scan_retained_depfiles, build,
                                      cache.get('depfiles') if cache else None, local,
                                      cache.get('directories') if cache else None, directories)
         identity_task = (pool.submit(ninja_deps_content_identity, deps_path, deps_digest,
                                      snapshot_result=snapshot_state)
                          if deps_digest is not None and (not same_deps or not valid_content) else None)
-        deps_task = None if same_deps or (local and valid_content) else pool.submit(query_deps)
+        deps_task = (None if same_scope and (same_deps or (local and valid_content))
+                     else pool.submit(query_deps))
         content_identity = (identity_task.result() if identity_task else
                             previous_content if deps_digest is not None and same_deps else None)
         if (not same_deps and local and content_identity != previous_content
@@ -1430,12 +1494,13 @@ def collect_capture_inventory(root, build, target, cache, local, deps_metadata=N
         graph = graph_task.result()
         same_graph = bool(cache and same_graph_content(cache.get('graph'), graph))
         phase(f'complete Ninja graph checked files={len(graph or {})} same_content={same_graph}', graph_started)
-        if (not same_deps and local and same_graph and valid_content
+        if (same_scope and not same_deps and local and same_graph and valid_content
                 and content_identity is not None and content_identity == previous_content):
             same_deps = True
             phase('Ninja deps content unchanged; reusing dependency paths')
-        inputs_task = None if same_graph else pool.submit(collect_ninja_paths, root, build, 'inputs', target)
-        if same_graph and same_deps:
+        inputs_task = (pool.submit(collect_ninja_paths, root, build, 'inputs', target)
+                       if not (same_scope and same_graph) and scope_task is None else None)
+        if same_scope and same_graph and same_deps:
             deps = set(cache['ninja_deps'])
             outputs_index = previous_index if local else None
         elif same_graph and indexed_candidate is not None:
@@ -1456,13 +1521,15 @@ def collect_capture_inventory(root, build, target, cache, local, deps_metadata=N
                 context = ninja_deps_index_context(root, build, graph)
                 outputs_index = make_ninja_deps_outputs(
                     snapshot_state, query_metadata['live_outputs'], deps, context)
-        inputs = set(cache['ninja_inputs']) if same_graph else inputs_task.result()
+        inputs = (set(cache['ninja_inputs']) if same_scope and same_graph else
+                  scope_task.result() if scope_task is not None else inputs_task.result())
         inventory = inventory_task.result()
         # Do not retain the large binary log through input fingerprinting.
         snapshot_state.clear()
         query_metadata.clear()
     check_ninja_deps_snapshot(build, deps_signature)
-    phase(f'Ninja inventory reused inputs={same_graph} deps={same_graph and same_deps} indexed={used_index}')
+    phase(f'Ninja inventory reused inputs={same_scope and same_graph} '
+          f'deps={same_scope and same_graph and same_deps} indexed={used_index}')
     if deps_metadata is not None:
         deps_metadata.update(content_identity=content_identity, log_signature=deps_signature,
                              outputs_index=outputs_index, used_outputs_index=used_index)
@@ -1477,9 +1544,12 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
     # copy, host change or independent checkout still has a different identity.
     local = bool(cache and all(cache.get('instance', {}).get(key) == value
                                for key, value in instance.items()))
+    same_scope = bool(cache and target_key(cache.get('target')) == target_key(target))
     if cache and allow_dirty:
-        count = previous.get('baseline_planned') if previous else None
-        phase('Ninja audit skipped: successful make_all; previous diagnostic count retained')
+        count = previous.get('baseline_planned') if same_scope and previous else None
+        diagnostic = ('previous diagnostic count retained' if same_scope
+                      else 'diagnostic count unavailable after target change')
+        phase(f'Ninja audit skipped: successful {target}; {diagnostic}')
     else:
         phase('auditing Ninja baseline')
         audit_started = time.perf_counter()
@@ -1511,6 +1581,12 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
         fingerprints = {**fingerprints, **verified} if local else verified
         phase(f'reusing entry-verified fingerprints candidates={len(verified)}')
     files = fingerprint_inputs(root, build, paths, fingerprints, local or bool(verified))
+    retained_sources = {name: record for name, record in (previous or {}).get('files', {}).items()
+                        if name not in files and (root / name).exists()}
+    retained_inputs = len(retained_sources)
+    pending_retained = [name for name, record in retained_sources.items()
+                        if file_signature((root / name).stat()) != record.get('stat')]
+    files = {**retained_sources, **files}
     if previous and files == previous.get('files'):
         phase('successful baseline refreshed (unchanged inputs)')
     args = (build / 'args.gn').read_text() if (build / 'args.gn').exists() else ''
@@ -1531,6 +1607,8 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
     phase('baseline tools fingerprinted', tool_started)
     data = {'version': 1, 'canonical_root': str(root), 'build_dir': str(build.relative_to(root)),
             'target': target, 'baseline_planned': count, 'files': files, 'mtime_ceiling_ns': ceiling,
+            'retained_input_count': retained_inputs,
+            'pending_retained_inputs': pending_retained,
             'tools': tools,
             'build_time': value('ohos_build_time'), 'build_datetime': value('ohos_build_datetime'),
             'automatic': automatic, 'origin_instance': instance_identity(root),
@@ -1550,6 +1628,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
         collection['deps_outputs_index'] = deps_metadata['outputs_index']
     cache_started = time.perf_counter()
     unchanged_index = (local and same_graph and same_deps
+                       and same_scope
                        and 'deps_content_sha256' in cache
                        and cache.get('deps_sha256') == deps_digest
                        and cache.get('deps_content_sha256') == deps_metadata['content_identity']
@@ -1572,7 +1651,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
     data['collection_generation'] = generation
     data['collection_sha256'] = (previous['collection_sha256'] if unchanged_index
                                  else digest(collection_cache_path(root, build)))
-    data['baseline_planned_reused'] = bool(cache and allow_dirty)
+    data['baseline_planned_reused'] = bool(same_scope and allow_dirty)
     phase('collection index ready', cache_started)
     destination = root / (manifest or MANIFEST)
     save_started = time.perf_counter()
@@ -1582,6 +1661,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
     phase('baseline manifest written', save_started)
     print(json.dumps({'manifest': str(destination), 'source_inputs': len(files), 'baseline_planned': count}))
     phase('baseline capture complete', started)
+    return data
 
 
 _RESTORE_RESOLUTIONS = None
@@ -1811,10 +1891,13 @@ def load_verified_inputs(root, build):
     return None
 
 
-def acknowledge_successful_baseline(root):
-    # Only finish's successful full-product branches acknowledge a newly sealed
-    # manifest. A changed/imported manifest must still invalidate this cache.
-    write_restore_state(root, restore_identity(root))
+def acknowledge_successful_baseline(root, data=None):
+    # Successful finish must publish both files before the build can return.
+    # Other restore-cache writes remain best effort, with a conservative recheck.
+    identity = restore_identity(root)
+    if data and data.get('pending_retained_inputs'):
+        identity['pending_retained_inputs'] = True
+    write_manifest(restore_state_path(root), identity)
 
 
 def write_restore_state(root, identity):
