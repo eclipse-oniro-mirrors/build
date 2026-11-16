@@ -669,6 +669,7 @@ def filesystem_proof(root, build):
     except (OSError, ValueError, AttributeError, IndexError):
         return None
 
+
 def cloned_device(root, build, proof, instance):
     """Allow metadata reuse only across supported, matching volume identities."""
     if not isinstance(proof, dict) or not isinstance(instance, dict):
@@ -686,6 +687,7 @@ def cloned_device(root, build, proof, instance):
     # future timestamps cannot prove that a same-tick edit did not occur.
     return proof['device'], actual['device'], time.time_ns() - 1_000_000_000
 
+
 def cloned_signature(before, current, devices):
     if (not isinstance(before, list) or len(before) != len(current) or
             any(type(value) is not int for value in before) or
@@ -694,6 +696,26 @@ def cloned_signature(before, current, devices):
             (before[0], current[0]) != devices[:2] or before[1:] != current[1:]):
         return False
     return True
+
+
+def cloned_collection_record(build, field, name, record, devices):
+    path = build if field == 'directories' and name == '.' else build / name
+    # Even equal device numbers on different servers are not proof.
+    # A rejected record must force its ordinary content/listing read.
+    result = dict(record, stat=None)
+    if field == 'directories':
+        result['timestamp_stable'] = False
+    try:
+        info = path.stat() if field == 'graph' or name == '.' else path.lstat()
+        signature = file_signature(info)
+        if field == 'directories':
+            signature.append(info.st_nlink)
+        if cloned_signature(record.get('stat'), signature, devices):
+            result = dict(record, stat=signature)
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    return result
+
 
 def rebase_cloned_collection(root, build, cache):
     devices = cloned_device(root, build, cache.get('filesystem_proof'), cache.get('instance'))
@@ -710,26 +732,13 @@ def rebase_cloned_collection(root, build, cache):
         for name, record in entries.items():
             if not isinstance(record, dict):
                 return None
-            path = build if field == 'directories' and name == '.' else build / name
-            # Even equal device numbers on different servers are not proof.
-            # A rejected record must force its ordinary content/listing read.
-            entries[name] = dict(record, stat=None)
-            if field == 'directories':
-                entries[name]['timestamp_stable'] = False
-            try:
-                info = path.stat() if field == 'graph' or name == '.' else path.lstat()
-                signature = file_signature(info)
-                if field == 'directories':
-                    signature.append(info.st_nlink)
-                if cloned_signature(record.get('stat'), signature, devices):
-                    entries[name] = dict(record, stat=signature)
-            except (FileNotFoundError, NotADirectoryError):
-                pass
+            entries[name] = cloned_collection_record(build, field, name, record, devices)
         result[field] = entries
     result['instance'] = local_collection_identity(root)
     result['clone_rebased'] = True
     phase('matching cloned filesystem: verifying indexed metadata before reuse')
     return result
+
 
 def cloned_input_batch(context):
     root_name, items, devices = context
