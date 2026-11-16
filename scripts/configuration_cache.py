@@ -70,14 +70,14 @@ def environment_digest(excluded=()):
                    (key.lower().startswith(ENV_PREFIXES) or key.upper() in ENV_NAMES)})
 
 
-
-
 def configuration_output_snapshot(output):
     """Observe GN/Loader files before Ninja, without treating objects as config."""
     result = {}
     excluded = {'.incremental', '.cache', '.clangd-lsp-work', 'lsp-portable'}
+
     def walk_error(error):
         raise error
+
     for directory, directories, files in os.walk(output, onerror=walk_error):
         directories[:] = [name for name in directories if name not in excluded]
         for name in directories:
