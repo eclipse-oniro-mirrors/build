@@ -42,6 +42,8 @@ VERIFIED_RUN_ENV = 'OHOS_INCREMENTAL_VERIFIED_RUN'
 DEPFILE_INPUTS_VERSION = 1
 ACTIVE_POLICY = None
 ACTIVE_ROOT = None
+_TOOL_PROOFS = {}
+_TOOL_PROOF_ROOT = None
 FINGERPRINT_BATCH_SIZE = 128
 DIRECTORY_PARALLEL_MIN = 8192
 NINJA_DEPS_INDEX_LIMIT = 32 * 1024 * 1024
@@ -266,6 +268,23 @@ def only_optional_probe_executed(build):
                for description in steps)
 
 
+def depfile_directories_changed(previous, current):
+    if previous.keys() != current.keys():
+        return True
+    for name, record in current.items():
+        old = previous[name]
+        if record is old:
+            continue
+        # Sealing/report files continuously change these directory timestamps.
+        # Keep rescanning their actual membership; metadata alone need not
+        # rewrite the complete, otherwise unchanged dependency inventory.
+        if name not in ('.', 'packages'):
+            return True
+        if record['children'] != old['children'] or record['depfiles'] != old['depfiles']:
+            return True
+    return False
+
+
 def refresh_unchanged_index(root, build, previous, cache):
     """Validate an unchanged complete inventory without reparsing its rules.
 
@@ -333,9 +352,9 @@ def refresh_unchanged_index(root, build, previous, cache):
     except (FileNotFoundError, NotADirectoryError):
         return False
     check_ninja_deps_snapshot(build, deps_signature, cache.get("deps_sha256"))
+    original_manifest = previous
     previous = dict(previous)
-    directory_changes = any(record is not cache.get('directories', {}).get(name)
-                            for name, record in directories.items())
+    directory_changes = depfile_directories_changed(cache.get('directories', {}), directories)
     if changed_depfiles or directory_changes:
         # Publish metadata only after every source, graph, dependency and tool
         # check above succeeds. A crash between these two atomic replacements
@@ -368,7 +387,8 @@ def refresh_unchanged_index(root, build, previous, cache):
                 ceiling = max(ceiling, int(fields[2]))
     previous['mtime_ceiling_ns'] = ceiling
     check_ninja_deps_snapshot(build, deps_signature, cache.get("deps_sha256"))
-    write_manifest(root / MANIFEST, previous)
+    if previous != original_manifest:
+        write_manifest(root / MANIFEST, previous)
     return True
 
 
@@ -503,34 +523,54 @@ def digest(path):
 def directory_digest(path):
     """Fingerprint membership; file contents remain separate Ninja inputs."""
     entries = []
-    for child in sorted(path.iterdir()):
-        if child.is_symlink():
-            kind = 'link:' + os.readlink(child)
-        else:
-            kind = 'directory' if child.is_dir() else 'file'
-        entries.append((child.name, kind))
+    with os.scandir(path) as children:
+        for child in children:
+            if child.is_symlink():
+                kind = 'link:' + os.readlink(child.path)
+            else:
+                kind = 'directory' if child.is_dir(follow_symlinks=False) else 'file'
+            entries.append((child.name, kind))
+    entries.sort()
     return hashlib.sha256(json.dumps(entries, ensure_ascii=True).encode()).hexdigest()
 
 
 def tool_identities(root):
+    global _TOOL_PROOFS, _TOOL_PROOF_ROOT
     machine = 'aarch64' if os.uname().machine == 'aarch64' else 'x86'
     llvm_machine = 'aarch64' if os.uname().machine == 'aarch64' else 'x86_64'
     candidates = [f'prebuilts/build-tools/linux-{machine}/bin/{name}' for name in ('ninja', 'gn')]
     candidates += [f'prebuilts/clang/ohos/linux-{llvm_machine}/llvm/bin/{name}'
                    for name in ('clang', 'clang++', 'ld.lld')]
     candidates += ['prebuilts/build-tools/common/nodejs/current/bin/node']
-    identities, hashed = {}, {}
+    proofs = _TOOL_PROOFS if _TOOL_PROOF_ROOT == str(root) else {}
+    identities, hashed, current = {}, {}, {}
     for name in candidates:
         path = root / name
         if path.is_file():
             resolved = path.resolve()
-            if resolved not in hashed:
-                hashed[resolved] = digest(path)
-            identities[name] = hashed[resolved]
+            before = file_signature(path.stat())
+            proof = proofs.get(name, {})
+            if (isinstance(proof, dict) and proof.get('stat') == before
+                    and proof.get('resolved') == str(resolved)
+                    and isinstance(proof.get('sha256'), str)
+                    and re.fullmatch('[0-9a-f]{64}', proof['sha256'])):
+                fingerprint = proof['sha256']
+            else:
+                fingerprint = hashed.get((resolved, tuple(before)))
+                if fingerprint is None:
+                    fingerprint = digest(path)
+            if file_signature(path.stat()) != before or path.resolve() != resolved:
+                raise RuntimeError(f'Toolchain changed while fingerprinting: {name}')
+            hashed[(resolved, tuple(before))] = fingerprint
+            identities[name] = fingerprint
+            current[name] = {'sha256': fingerprint, 'resolved': str(resolved), 'stat': before}
+    _TOOL_PROOF_ROOT, _TOOL_PROOFS = str(root), current
     return identities
 
 
 def validate_tools(root, data):
+    global _TOOL_PROOFS, _TOOL_PROOF_ROOT
+    _TOOL_PROOF_ROOT, _TOOL_PROOFS = str(root), {}
     started = time.perf_counter()
     hashes = {}
     phase(f'validating tools entries={len(data.get("tools", {}))}')
@@ -550,6 +590,8 @@ def validate_tools(root, data):
                 raise RuntimeError(f'Toolchain changed while validating: {name}')
         if hashes[key] != expected:
             raise RuntimeError(f'Toolchain changed: {name}; create a matching build baseline before reusing this snapshot')
+        _TOOL_PROOFS[name] = {'sha256': expected, 'resolved': str(path.resolve()),
+                              'stat': file_signature(stat)}
     phase(f'tools validated unique_files={len(hashes)} bytes_hashed={sum(key[2] for key in hashes)}', started)
 
 
@@ -636,7 +678,6 @@ def depfile_rules(text):
                     continue
                 yield depfile_words(line[:index]), depfile_words(line[index + 1:])
                 break
-
 
 
 # The collection cache is optional acceleration, committed by generation only
@@ -1716,16 +1757,18 @@ def restore_read_batch(root_name, names):
     results = []
     for name in names:
         path = root / name
-        if Path(name).is_absolute() or '..' in Path(name).parts or path.is_symlink():
+        if Path(name).is_absolute() or '..' in Path(name).parts:
             raise ValueError(f'Invalid source input: {name}')
         resolved = os.path.join(resolve_cached_string(path.parent, cache), path.name)
         if resolved != resolved_root and not resolved.startswith(prefix):
             raise ValueError(f'Invalid source input: {name}')
         try:
-            before = path.stat()
+            before = path.lstat()
         except FileNotFoundError:
             results.append((name, None, None, None))
             continue
+        if stat_module.S_ISLNK(before.st_mode):
+            raise ValueError(f'Invalid source input: {name}')
         directory = stat_module.S_ISDIR(before.st_mode)
         fingerprint = directory_digest(path) if directory else digest(path)
         after = path.stat()
@@ -1770,12 +1813,14 @@ def restore_parallel(root, data, workers, verified, started):
                         continue
                     # A previous alias may have updated this inode's mtime.
                     # Revalidate instead of applying a stale worker result.
-                    if file_signature(path.lstat()) != signature:
+                    current = path.lstat()
+                    if file_signature(current) != signature:
                         _, directory, fingerprint, signature = restore_read_batch(str(root), [name])[0]
                         if signature is None:
                             counts['missing'] += 1
                             processed += 1
                             continue
+                        current = path.stat()
                     record = data['files'][name]
                     executable = bool(signature[5] & 0o111)
                     if (directory != (record.get('kind') == 'directory')
@@ -1785,10 +1830,11 @@ def restore_parallel(root, data, workers, verified, started):
                             raise RuntimeError('Snapshot outputs are newer than the host clock; synchronize clocks before restoring changed inputs')
                         os.utime(path, None, follow_symlinks=False)
                         counts['changed'] += 1
+                        current = path.stat()
                     elif signature[3] != record['mtime_ns']:
                         os.utime(path, ns=(path.stat().st_atime_ns, record['mtime_ns']), follow_symlinks=False)
                         counts['restored'] += 1
-                    current = path.stat()
+                        current = path.stat()
                     if verified is not None and [current.st_dev, current.st_ino, current.st_size, current.st_mode] == [signature[i] for i in (0, 1, 2, 5)]:
                         verified[name] = {'sha256': fingerprint, 'kind': 'directory' if directory else 'file',
                                           'mtime_ns': current.st_mtime_ns, 'executable': bool(current.st_mode & 0o111),
@@ -1874,6 +1920,7 @@ def verified_inputs_path(build):
 
 
 def load_verified_inputs(root, build):
+    global _TOOL_PROOFS, _TOOL_PROOF_ROOT
     path = verified_inputs_path(build)
     if path is None:
         return None
@@ -1885,6 +1932,8 @@ def load_verified_inputs(root, build):
         if (isinstance(data, dict) and data.get('version') == 1 and data.get('identity') == restore_identity(root)
                 and data.get('run') == os.environ[VERIFIED_RUN_ENV]
                 and isinstance(data.get('files'), dict)):
+            if isinstance(data.get('tools'), dict):
+                _TOOL_PROOF_ROOT, _TOOL_PROOFS = str(root), data['tools']
             return data['files']
     except (OSError, ValueError):
         pass
@@ -1897,7 +1946,13 @@ def acknowledge_successful_baseline(root, data=None):
     identity = restore_identity(root)
     if data and data.get('pending_retained_inputs'):
         identity['pending_retained_inputs'] = True
-    write_manifest(restore_state_path(root), identity)
+    destination = restore_state_path(root)
+    try:
+        if json.loads(destination.read_text()) == identity:
+            return
+    except (OSError, ValueError):
+        pass
+    write_manifest(destination, identity)
 
 
 def write_restore_state(root, identity):
@@ -1933,7 +1988,9 @@ def restore_transferred_snapshot(root, data, *, tools_validated=False):
             try:
                 journal.parent.mkdir(parents=True, exist_ok=True)
                 content = json.dumps({'version': 1, 'run': os.environ[VERIFIED_RUN_ENV],
-                                      'identity': identity, 'files': verified}, separators=(',', ':')).encode()
+                                      'identity': identity, 'files': verified,
+                                      'tools': _TOOL_PROOFS if _TOOL_PROOF_ROOT == str(root) else {}},
+                                     separators=(',', ':')).encode()
                 temporary.write_bytes(hashlib.sha256(content).hexdigest().encode() + b'\n' + content)
                 os.replace(temporary, journal)
                 phase(f'entry verification saved inputs={len(verified)}', started_write)
