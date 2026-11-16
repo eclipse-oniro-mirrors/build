@@ -249,7 +249,12 @@ def prepare_build(root, arguments):
             # Check just those retained inputs before the next local Ninja run.
             restore(root, dict(data, files={name: data['files'][name] for name in pending}))
         print(f'incremental workspace: in-place build at {root}', flush=True)
-        return  # Ordinary in-place build keeps its existing build-time behavior.
+        # Use the same product-scoped timestamps as the relocation entry. The
+        # guarded shell re-entry below binds these values to its direct HB
+        # child, without repeating transferred-input restore on a local build.
+        os.environ['OHOS_INCREMENTAL_BUILD_TIME'] = data.get('build_time', '')
+        os.environ['OHOS_INCREMENTAL_BUILD_DATETIME'] = data.get('build_datetime', '')
+        return
     enter(root, data, ['bash', './build.sh', *arguments])
 
 
