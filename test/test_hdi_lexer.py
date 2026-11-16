@@ -41,12 +41,6 @@ class HdiLexerTest(unittest.TestCase):
         """Clean up the temporary directory."""
         self._temp.cleanup()
 
-    def _idl(self, name, content):
-        """Write a temporary IDL file and return its path."""
-        path = self.root / name
-        path.write_text(content)
-        return str(path)
-
     def test_lexer_returns_str_not_char(self):
         """peek_char should return a str, not a Char wrapper object."""
         idl = self._idl('IFoo.idl', 'package ohos.test.v1_0;\ninterface IFoo {\n}\n')
@@ -101,6 +95,12 @@ class HdiLexerTest(unittest.TestCase):
         detail = parser.parse_one(idl)
         self.assertEqual(detail.package, "ohos.test.v1_0")
         self.assertEqual(detail.name, "IFoo")
+
+    def _idl(self, name, content):
+        """Write a temporary IDL file and return its path."""
+        path = self.root / name
+        path.write_text(content)
+        return str(path)
 
 
 if __name__ == '__main__':
