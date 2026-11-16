@@ -311,6 +311,7 @@ class OHOSLoader(LoadInterface):
         target_syscap_with_part_name_list = []
         target_syscap_list = []
         target_syscap_for_init_list = []
+        full_syscap_for_init_list = []
         all_syscap_list = []
         for syscap in syscap_info_list:
             if syscap['component'] not in self.required_parts_targets_list:
@@ -341,8 +342,27 @@ class OHOSLoader(LoadInterface):
             for syscap_string in syscap['syscap']:
                 if syscap_string.startswith("SystemCapability.") is True:
                     target_syscap_init_str = "const."
+                    full_syscap_init_str = "const."
                     syscap_name = syscap_string.split('=')[0].strip()
                     all_syscap_product = syscap_product_dict['syscap']
+
+                    # Logic for full_syscap_for_init_list (including 'false')
+                    if syscap_name in all_syscap_product and not all_syscap_product[syscap_name]:
+                        full_syscap_init_str += syscap_name + '=false\n'
+                    elif syscap_name in all_syscap_product and all_syscap_product[syscap_name]:
+                        full_syscap_init_str += syscap_name + '=true\n'
+                    else:
+                        if syscap_string.endswith('true'):
+                            full_syscap_init_str = syscap_name + '=true\n'
+                        elif syscap_string.endswith('false'):
+                            full_syscap_init_str = syscap_name + '=false\n'
+                        else:
+                            full_syscap_init_str = syscap_name + '=true\n'
+
+                    if full_syscap_init_str not in full_syscap_for_init_list:
+                        full_syscap_for_init_list.append(
+                            full_syscap_init_str)
+
                     if syscap_name in all_syscap_product and not all_syscap_product[syscap_name]:
                         remove_list.append(syscap_string)
                         continue
@@ -412,6 +432,18 @@ class OHOSLoader(LoadInterface):
                                     stat.S_IWUSR | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH), 'w') as file:
                 file.write(syscap_content)
         LogUtil.hb_info("generate target syscap for init list to '{}'".format(
+            target_syscap_for_init_file), mode=self.config.log_mode)
+
+        # Generate full_syscap.para
+        developtools_syscap_path = os.path.join(
+            self.source_root_dir, self.gn_root_out_dir, "developtools", "syscap_codec")
+        if not os.path.exists(developtools_syscap_path):
+            os.makedirs(developtools_syscap_path, exist_ok=True)
+        full_syscap_for_init_file = os.path.join(
+            developtools_syscap_path, "full_syscap.para")
+        with open(full_syscap_for_init_file, "w") as file:
+            file.writelines(sorted(full_syscap_for_init_list))
+        LogUtil.hb_info("generate full syscap for init list to '{}'".format(
             target_syscap_for_init_file), mode=self.config.log_mode)
 
 # get method
