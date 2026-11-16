@@ -127,6 +127,12 @@ declare_args() {
   #   "basic":    Basic security policy enabled. Suitable for Low-performance devices.
   #               High-load features like CFI are disabled with this value.
   build_framework_security_configs_policy = "high"
+
+  # Build type selector for sanitizer frameworks:
+  # "":           default, keep use_raceguard / use_hwasan as-is.
+  # "raceguard":  raceguard build.
+  # "hwasan":     hwasan build.
+  sanitizer_build_type = ""
 }
 
 # Raceguard is opt-in per product and only valid for clang builds on ohos: it
