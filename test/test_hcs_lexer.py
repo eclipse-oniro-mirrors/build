@@ -41,12 +41,6 @@ class HcsLexerTest(unittest.TestCase):
         """Clean up the temporary directory."""
         self._temp.cleanup()
 
-    def _hcs(self, name, content):
-        """Write a temporary HCS file and return its path."""
-        path = self.root / name
-        path.write_text(content)
-        return str(path)
-
     def test_lexer_returns_str_not_char(self):
         """peek_char should return a str, not a Char wrapper object."""
         hcs_file = self._hcs('test.hcs', '#include "other.hcs"\nroot {\n}\n')
@@ -77,6 +71,12 @@ class HcsLexerTest(unittest.TestCase):
         lex = hcs.Lexer(hcs_file)
         token = lex.peek_token()
         self.assertEqual(token.token_type, hcs.TokenType.COMMENT)
+
+    def _hcs(self, name, content):
+        """Write a temporary HCS file and return its path."""
+        path = self.root / name
+        path.write_text(content)
+        return str(path)
 
 
 if __name__ == '__main__':
