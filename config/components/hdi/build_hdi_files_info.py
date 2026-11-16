@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -318,6 +319,9 @@ class IdlDetail(object):
 
 
 class IdlParser(object):
+    def __init__(self):
+        self._parsed_cache = {}
+
     def parse(self, ):
         all_idl_details = {}
         if Option.language == "c":
@@ -333,8 +337,13 @@ class IdlParser(object):
         self.parse_module_info(all_idl_details)
 
     def parse_one(self, file_path):
-        cur_idl_detail = IdlDetail(file_path)
+        # Read exactly as the lexer normally does. Comparing source text also
+        # catches edits whose size, mtime and coarse ctime are all unchanged.
         lex = Lexer(file_path)
+        cached = self._parsed_cache.get(file_path)
+        if cached is not None and cached[0] == lex.data:
+            return copy.deepcopy(cached[1])
+        cur_idl_detail = IdlDetail(file_path)
         while lex.peek_token().token_type != TokenType.END_OF_FILE:
             cur_token_type = lex.peek_token().token_type
             if cur_token_type == TokenType.PACKAGE:
@@ -348,6 +357,7 @@ class IdlParser(object):
                 self.parse_interface(lex, cur_idl_detail)
             else:
                 lex.get_token()
+        self._parsed_cache[file_path] = (lex.data, copy.deepcopy(cur_idl_detail))
         return cur_idl_detail
 
     def parse_c_idl_files(self, all_idl_details):
@@ -367,18 +377,9 @@ class IdlParser(object):
         self.merged_idl_details(all_idl_details)
 
     def parse_c_idl_files_import(self, file_path, idl_queue):
-        lex = Lexer(file_path)
-        while lex.peek_token().token_type != TokenType.END_OF_FILE:
-            cur_token_type = lex.peek_token().token_type
-            if cur_token_type == TokenType.IMPORT:
-                lex.get_token()
-                token = lex.peek_token()
-                if lex.peek_token().token_type != TokenType.ID:
-                    raise Exception("{}: expected package name before '{}'".format(
-                        token.info(), token.value))
-                idl_queue.append(
-                    CodeGen.get_package_path(token.value) + ".idl")
-            lex.get_token()
+        idl_detail = self.parse_one(file_path)
+        for import_name in idl_detail.imports:
+            idl_queue.append(CodeGen.get_package_path(import_name) + ".idl")
 
     def update_imports(self, all_idl_details, idl_detail, merged_details):
         if idl_detail.full_name() not in merged_details:
