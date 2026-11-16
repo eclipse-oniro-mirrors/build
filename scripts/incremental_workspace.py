@@ -534,6 +534,16 @@ def directory_digest(path):
     return hashlib.sha256(json.dumps(entries, ensure_ascii=True).encode()).hexdigest()
 
 
+def tool_fingerprint(path, resolved, before, proof, hashed):
+    if (isinstance(proof, dict) and proof.get('stat') == before
+            and proof.get('resolved') == str(resolved)
+            and isinstance(proof.get('sha256'), str)
+            and re.fullmatch('[0-9a-f]{64}', proof['sha256'])):
+        return proof['sha256']
+    fingerprint = hashed.get((resolved, tuple(before)))
+    return digest(path) if fingerprint is None else fingerprint
+
+
 def tool_identities(root):
     global _TOOL_PROOFS, _TOOL_PROOF_ROOT
     machine = 'aarch64' if os.uname().machine == 'aarch64' else 'x86'
@@ -550,15 +560,7 @@ def tool_identities(root):
             resolved = path.resolve()
             before = file_signature(path.stat())
             proof = proofs.get(name, {})
-            if (isinstance(proof, dict) and proof.get('stat') == before
-                    and proof.get('resolved') == str(resolved)
-                    and isinstance(proof.get('sha256'), str)
-                    and re.fullmatch('[0-9a-f]{64}', proof['sha256'])):
-                fingerprint = proof['sha256']
-            else:
-                fingerprint = hashed.get((resolved, tuple(before)))
-                if fingerprint is None:
-                    fingerprint = digest(path)
+            fingerprint = tool_fingerprint(path, resolved, before, proof, hashed)
             if file_signature(path.stat()) != before or path.resolve() != resolved:
                 raise RuntimeError(f'Toolchain changed while fingerprinting: {name}')
             hashed[(resolved, tuple(before))] = fingerprint
