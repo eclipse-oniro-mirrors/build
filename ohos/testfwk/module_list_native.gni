@@ -1,0 +1,25 @@
+# Copyright (c) 2026 Huawei Device Co., Ltd.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Imported lazily by plain-ASCII module-list targets and cached by GN.
+# Any serializer edit keeps the original execution and output semantics.
+module_list_native_generator_matches =
+    exec_script(
+        "//build/ohos/testfwk/check_module_list_format.py",
+        [
+          rebase_path("//build/ohos/testfwk/gen_module_list_files.py",
+                      root_build_dir),
+          "66272d228bd6ce46dff0a242808eb83f0bea85ff2b8306c77277c4c4592f2659",
+        ],
+        "value",
+        [ "//build/ohos/testfwk/gen_module_list_files.py" ])
