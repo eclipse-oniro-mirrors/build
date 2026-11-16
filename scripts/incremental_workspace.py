@@ -428,7 +428,8 @@ def _finish_build(root, arguments):
         phase(f'baseline target scope changed: {previous.get("target")} -> {target}; checking reusable collection cache')
     cache = load_collection_cache(root, build, previous)
     if cache is not None:
-        if same_target and refresh_unchanged_index(root, build, previous, cache):
+        if (same_target and not cache.get('clone_rebased')
+                and refresh_unchanged_index(root, build, previous, cache)):
             acknowledge_successful_baseline(root, previous)
             phase('successful baseline refreshed (unchanged indexed inputs)', started)
             return
@@ -689,6 +690,181 @@ DEPFILE_CACHE_FORMAT = 1
 PARSED_DEPFILE_CACHE_BYTES = 64 * 1024 * 1024
 
 
+def filesystem_proof(root, build):
+    """Describe a supported single-volume workspace without walking its files."""
+    try:
+        source, output = root.stat(), build.stat()
+        if source.st_dev != output.st_dev:
+            return None
+        resolved = os.path.realpath(root)
+        filesystem, longest = None, -1
+        for line in Path('/proc/self/mountinfo').read_text().splitlines():
+            fields = line.split()
+            separator = fields.index('-')
+            mountpoint = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), fields[4])
+            if (resolved == mountpoint or resolved.startswith(mountpoint.rstrip('/') + '/')) and len(mountpoint) > longest:
+                filesystem, longest = fields[separator + 1], len(mountpoint)
+        identifier = os.statvfs(root).f_fsid
+        if filesystem != 'ext4' or not identifier:
+            return None
+        return {'format': 1, 'filesystem': filesystem, 'id': identifier,
+                'device': source.st_dev, 'root_inode': source.st_ino,
+                'build_inode': output.st_ino}
+    except (OSError, ValueError, AttributeError, IndexError):
+        return None
+
+
+def cloned_device(root, build, proof, instance):
+    """Allow metadata reuse only across supported, matching volume identities."""
+    if not isinstance(proof, dict) or not isinstance(instance, dict):
+        return None
+    current = instance_identity(root)
+    if all(instance.get(key) == value for key, value in current.items()):
+        return None
+    actual = filesystem_proof(root, build)
+    if (actual is None or type(proof.get('format')) is not int or proof.get('format') != 1 or
+            any(proof.get(key) != actual[key] for key in
+                ('filesystem', 'id', 'root_inode', 'build_inode')) or
+            type(proof.get('device')) is not int):
+        return None
+    # Native ext4 timestamps may use the kernel coarse clock. Recent or
+    # future timestamps cannot prove that a same-tick edit did not occur.
+    return proof['device'], actual['device'], time.time_ns() - 1_000_000_000
+
+
+def cloned_signature(before, current, devices):
+    if (not isinstance(before, list) or len(before) != len(current) or
+            any(type(value) is not int for value in before) or
+            not before[4] % 1_000_000_000 or
+            before[4] >= devices[2] or
+            (before[0], current[0]) != devices[:2] or before[1:] != current[1:]):
+        return False
+    return True
+
+
+def cloned_collection_record(build, field, name, record, devices):
+    path = build if field == 'directories' and name == '.' else build / name
+    # Even equal device numbers on different servers are not proof.
+    # A rejected record must force its ordinary content/listing read.
+    result = dict(record, stat=None)
+    if field == 'directories':
+        result['timestamp_stable'] = False
+    try:
+        info = path.stat() if field == 'graph' or name == '.' else path.lstat()
+        signature = file_signature(info)
+        if field == 'directories':
+            signature.append(info.st_nlink)
+        if cloned_signature(record.get('stat'), signature, devices):
+            result = dict(record, stat=signature)
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    return result
+
+
+def rebase_cloned_collection(root, build, cache):
+    devices = cloned_device(root, build, cache.get('filesystem_proof'), cache.get('instance'))
+    if devices is None:
+        return cache
+    # Only already indexed paths are visited. Changed/new directory membership
+    # is still discovered by the normal inventory collector below.
+    if not all(isinstance(cache.get(field), dict) for field in
+               ('graph', 'directories', 'depfiles')):
+        return cache
+    result = dict(cache)
+    for field in ('graph', 'directories', 'depfiles'):
+        entries = dict(cache.get(field, {}))
+        for name, record in entries.items():
+            if not isinstance(record, dict):
+                return None
+            entries[name] = cloned_collection_record(build, field, name, record, devices)
+        result[field] = entries
+    result['instance'] = local_collection_identity(root)
+    result['clone_rebased'] = True
+    phase('matching cloned filesystem: verifying indexed metadata before reuse')
+    return result
+
+
+def cloned_input_batch(context):
+    root_name, items, devices = context
+    root = Path(root_name)
+    resolutions, result = {}, []
+    resolved_root = resolve_cached_string(root, resolutions)
+    prefix = resolved_root.rstrip(os.sep) + os.sep
+    for name, before in items:
+        path = root / name
+        if Path(name).is_absolute() or '..' in Path(name).parts:
+            raise ValueError(f'Invalid source input: {name}')
+        resolved = os.path.join(resolve_cached_string(path.parent, resolutions), path.name)
+        if resolved != resolved_root and not resolved.startswith(prefix):
+            raise ValueError(f'Invalid source input: {name}')
+        signature = None
+        try:
+            info = path.lstat()
+            current = file_signature(info)
+            if ((stat_module.S_ISDIR(info.st_mode) or stat_module.S_ISREG(info.st_mode))
+                    and cloned_signature(before, current, devices)):
+                signature = current
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        result.append((name, signature))
+    return result
+
+
+def cloned_input_records(root, records, devices):
+    names = list(records)
+    workers = restore_worker_count()
+    if len(names) < RESTORE_PARALLEL_MIN_INPUTS or workers == 1 or not sys.platform.startswith('linux'):
+        yield from cloned_input_batch((str(root), [(name, records[name].get('stat'))
+                                                  for name in names], devices))
+        return
+    with ProcessPoolExecutor(max_workers=workers,
+                             mp_context=multiprocessing.get_context('spawn')) as pool:
+        for offset in range(0, len(names), 2 * workers * RESTORE_BATCH_SIZE):
+            batches = ((str(root), [(name, records[name].get('stat'))
+                        for name in names[index:index + RESTORE_BATCH_SIZE]], devices)
+                       for index in range(offset, min(offset + 2 * workers * RESTORE_BATCH_SIZE,
+                                                     len(names)), RESTORE_BATCH_SIZE))
+            for rows in pool.map(cloned_input_batch, batches):
+                yield from rows
+
+
+def partition_cloned_inputs(root, data):
+    relative = data.get('build_dir')
+    if not relative:
+        return {}, data['files']
+    devices = cloned_device(root, root / relative, data.get('filesystem_proof'), data.get('origin_instance'))
+    if devices is None:
+        return {}, data['files']
+    remaining, verified = dict(data['files']), {}
+    for name, signature in cloned_input_records(root, data['files'], devices):
+        record = data['files'][name]
+        if (signature is not None and record.get('mtime_ns') == signature[3] and
+                stat_module.S_ISDIR(signature[5]) == (record.get('kind') == 'directory') and
+                bool(signature[5] & 0o111) == record.get('executable', bool(signature[5] & 0o111)) and
+                isinstance(record.get('sha256'), str) and
+                re.fullmatch('[0-9a-f]{64}', record['sha256'])):
+            verified[name] = dict(record, stat=signature)
+            remaining.pop(name)
+    phase(f'cloned input metadata verified={len(verified)} fallback={len(remaining)}')
+    return verified, remaining
+
+
+def recheck_cloned_inputs(root, data, cloned, verified):
+    """A fallback alias can have changed a previously checked inode's time."""
+    if not cloned:
+        return
+    device = root.stat().st_dev
+    devices = (device, device, time.time_ns() - 1_000_000_000)
+    retry = {name: data['files'][name]
+             for name, signature in cloned_input_records(root, cloned, devices)
+             if signature is None}
+    if not retry:
+        return
+    for name in retry:
+        verified.pop(name, None)
+    restore(root, dict(data, files=retry), tools_validated=True, verified=verified)
+
+
 def local_collection_identity(root):
     return {**instance_identity(root),
             'physical_root': os.environ.get(PHYSICAL_ROOT_ENV, str(root))}
@@ -740,7 +916,7 @@ def load_collection_cache(root, build, previous):
         return None
     if data.get('ninja_sha256') != digest(Path(ninja_command(root, build)[0])):
         return None
-    return data
+    return rebase_cloned_collection(root, build, data)
 
 
 def resolve_cached_string(path, cache):
@@ -1655,6 +1831,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
             'tools': tools,
             'build_time': value('ohos_build_time'), 'build_datetime': value('ohos_build_datetime'),
             'automatic': automatic, 'origin_instance': instance_identity(root),
+            'filesystem_proof': filesystem_proof(root, build),
             'graph_identity': graph_identity(build),
             'depfile_inputs_version': DEPFILE_INPUTS_VERSION, 'retained_depfiles': retained}
     generation = uuid.uuid4().hex
@@ -1662,6 +1839,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
                   'depfile_cache_format': DEPFILE_CACHE_FORMAT,
                   'canonical_root': str(root), 'build_dir': str(build.relative_to(root)),
                   'target': target, 'instance': local_collection_identity(root), 'graph': graph,
+                  'filesystem_proof': filesystem_proof(root, build),
                   'ninja_sha256': digest(Path(ninja_command(root, build)[0])),
                   'deps_sha256': deps_digest, 'deps_content_sha256': deps_metadata['content_identity'],
                   'ninja_inputs': sorted(inputs),
@@ -1670,7 +1848,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
     if deps_metadata.get('outputs_index') is not None:
         collection['deps_outputs_index'] = deps_metadata['outputs_index']
     cache_started = time.perf_counter()
-    unchanged_index = (local and same_graph and same_deps
+    unchanged_index = (local and not cache.get('clone_rebased') and same_graph and same_deps
                        and same_scope
                        and 'deps_content_sha256' in cache
                        and cache.get('deps_sha256') == deps_digest
@@ -1984,7 +2162,11 @@ def restore_transferred_snapshot(root, data, *, tools_validated=False):
         if verified is None:
             restore(root, data, tools_validated=tools_validated)
         else:
-            restore(root, data, tools_validated=tools_validated, verified=verified)
+            cloned, remaining = partition_cloned_inputs(root, data)
+            verified.update(cloned)
+            restore(root, dict(data, files=remaining), tools_validated=tools_validated, verified=verified)
+            if remaining:
+                recheck_cloned_inputs(root, data, cloned, verified)
             started_write = time.perf_counter()
             temporary = journal.with_name(journal.name + f'.{os.getpid()}.tmp')
             try:
