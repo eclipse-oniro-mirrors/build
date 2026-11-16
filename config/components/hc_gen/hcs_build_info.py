@@ -48,15 +48,6 @@ class Token(object):
         return "{}:{}:{}".format(self.file_name, self.row, self.col)
 
 
-class Char(object):
-    def __init__(self, is_eof, char):
-        self.is_eof = is_eof
-        self.char = char
-
-    def dump(self):
-        return "{%s, %s}" % (self.is_eof, self.char)
-
-
 class Lexer(object):
     def __init__(self, idl_file_path):
         self.have_peek = False
