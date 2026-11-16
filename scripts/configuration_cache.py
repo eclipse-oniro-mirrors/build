@@ -32,7 +32,6 @@ from scripts.incremental_product_policy import inherited_snapshot
 CONFIG_SUFFIXES = {'.gn', '.gni', '.json', '.json5', '.py', '.sh', '.js',
                    '.yaml', '.yml', '.xml', '.ini', '.cfg', '.toml', '.prop',
                    '.properties', '.build', '.template', '.list'}
-OUTPUT_SUFFIXES = CONFIG_SUFFIXES | {'.ninja', '.txt', '.rsp', '.h', '.hpp', '.inc', '.c', '.cc', '.cpp'}
 IGNORED_DIRS = {'.git', '.repo', '__pycache__', '.cache', '.hvigor', 'node_modules'}
 ROOT_EXCLUDES = {'out', 'report', 'oh_venv'}
 # Capture selected wrapper paths as well as GN/Ninja identities. PATH may vary
@@ -46,6 +45,15 @@ RUNTIME_ENV = {'OHOS_INCREMENTAL_VERIFIED_RUN', 'OHOS_INCREMENTAL_ENTERED_PID',
                'OHOS_INCREMENTAL_JOBS', 'OHOS_INCREMENTAL_RESTORE_JOBS'}
 CACHE_VERSION = 5
 CONFIG_ROOTS = {'build', 'device', 'vendor', 'productdefine', 'component_dist'}
+RUNTIME_OUTPUT_NAMES = {'build.trace.gz', 'sorted_action_duration.txt'}
+
+
+def runtime_output_name(name):
+    return (name in RUNTIME_OUTPUT_NAMES or
+            (name.startswith('build.trace.') and name.endswith('.gz') and
+             name[len('build.trace.'):-len('.gz')].isdigit()))
+
+
 SCRIPT_SUFFIXES = {'.gn', '.gni', '.py', '.sh', '.build', '.template'}
 CACHE_ERRORS = (OSError, ValueError, KeyError, TypeError, RuntimeError, AttributeError,
                 IndexError, subprocess.SubprocessError, zlib.error)
@@ -56,10 +64,36 @@ def digest(value):
                                     separators=(',', ':')).encode()).hexdigest()
 
 
-def environment_digest():
+def environment_digest(excluded=()):
     return digest({key: value for key, value in os.environ.items()
-                   if key.upper() not in RUNTIME_ENV and
+                   if key.upper() not in RUNTIME_ENV and key.upper() not in excluded and
                    (key.lower().startswith(ENV_PREFIXES) or key.upper() in ENV_NAMES)})
+
+
+def configuration_output_snapshot(output):
+    """Observe GN/Loader files before Ninja, without treating objects as config."""
+    result = {}
+    excluded = {'.incremental', '.cache', '.clangd-lsp-work', 'lsp-portable'}
+
+    def walk_error(error):
+        raise error
+
+    for directory, directories, files in os.walk(output, onerror=walk_error):
+        directories[:] = [name for name in directories if name not in excluded]
+        for name in directories:
+            path = os.path.join(directory, name)
+            if os.path.islink(path) and os.path.exists(path):
+                result[path] = dependencies.signature(os.stat(path))
+        for name in files:
+            if str(directory) == str(output) and runtime_output_name(name):
+                continue
+            if (name.endswith('.log') or name.startswith('incremental_workspace') or
+                    name in ('.ninja_log', '.ninja_deps')):
+                continue
+            path = os.path.join(directory, name)
+            if not (os.path.islink(path) and not os.path.exists(path)):
+                result[path] = dependencies.signature(os.stat(path))
+    return result
 
 
 def entries_for(directory, root):
@@ -269,36 +303,66 @@ class ConfigurationCache:
         self.ninja = ninja
         self.can_record = can_record
         self.header = {}
+        self.configured_outputs = None
 
     @classmethod
     def for_build(cls, module):
         config = module.loader.config
         args = {key: arg.arg_value for key, arg in module.args_dict.items()}
         if (args.get('fast_rebuild') or args.get('build_only_load') or
-                args.get('build_only_gn') or args.get('build_target') != ['make_all'] or
+                args.get('build_only_gn') or
                 not inherited_snapshot(config.root_path, config.product, config.product_json)):
             return None
         from util.log_util import LogUtil
-        context = {'args': args, 'environment': environment_digest(),
+        legacy = {'args': args, 'environment': environment_digest(),
                    'python': sys.version, 'executable': sys.executable,
                    'root': config.root_path, 'output': config.out_path,
                    'gn_tool': dependencies.signature(Path(module.target_generator.exec).stat()),
                    'ninja_tool': dependencies.signature(Path(module.target_compiler.exec).stat())}
+        timestamps = {key: value for key, value in
+                      getattr(module.target_generator, 'args_dict', {}).items()
+                      if key in ('ohos_build_time', 'ohos_build_datetime')}
+        # The resolver has already converted these environment defaults into
+        # actual GN values. Compare the resolved values, so absent -> explicit
+        # baseline defaults with identical values is not a false cache miss.
+        timestamp_environment = {'OHOS_INCREMENTAL_' + key[5:].upper()
+                                 for key in timestamps}
+        # HB uses these only to select/rotate the ccache diagnostic log.
+        # CCACHE_EXEC, USE_CCACHE and the other build environment remain bound.
+        context_environment = timestamp_environment | {'CCACHE_LOG_SUFFIX', 'CCACHE_LOGFILE'}
+        # Targets select Ninja work; resolved Loader/GN parameters decide
+        # whether configuration is reusable. Never assume that a TDD/XTS
+        # target has the same resolved configuration as an image target.
+        context = dict(legacy, environment=environment_digest(context_environment),
+                       args={key: value for key, value in args.items()
+                                     if key != 'build_target'},
+                       loader={'args': getattr(module.loader, 'args_dict', {}),
+                               'flags': getattr(module.loader, 'flags_dict', {})},
+                       build_timestamps=timestamps)
         cache = cls(config.root_path, config.out_path, config.product, context,
                     LogUtil.hb_info, module.target_compiler.exec,
                     can_record=cold_output(Path(config.out_path)))
         # An existing out with no valid local proof uses the original build.
         # In particular, never parse/recapture an old 163 MB record on upgrade,
         # migration, failed builds, argument changes or malformed state.
-        if not cache.can_record and not cache.local_header():
-            return None
+        if not cache.can_record:
+            if not cache.local_header(check_context=False):
+                return None
+            if cache.header.get('configuration_output_format') != 1:
+                # Keep an existing v5 make_all cache usable without recapture.
+                # Its old output inventory is not proof for other goal scopes.
+                if args.get('build_target') != ['make_all'] or cache.header.get('context') != digest(legacy):
+                    return None
+                cache.context = digest(legacy)
+            elif cache.header.get('context') != cache.context:
+                return None
         return cache
 
-    def local_header(self):
+    def local_header(self, check_context=True):
         try:
             header = dependencies.read_json(self.success_path)
             if (header.get('version') == CACHE_VERSION and
-                    header.get('context') == self.context and
+                    (not check_context or header.get('context') == self.context) and
                     header.get('instance') == instance_identity(self.root, self.output) and
                     header.get('snapshot_stat') == dependencies.signature(self.path.stat()) and
                     header.get('priority_stat') == dependencies.signature(self.priority_path.stat())):
@@ -358,7 +422,14 @@ class ConfigurationCache:
         if hashlib.sha256(content).hexdigest() != self.header[key]:
             raise ValueError('Configuration snapshot digest changed')
         value = json.loads(zlib.decompress(content))
-        return transform_paths(value, self.root, False)
+        value = transform_paths(value, self.root, False)
+        # Older snapshots may contain post-build reports. HB owns these root
+        # files and rewrites them after Ninja; they are not GN/Loader outputs.
+        prefix = str(self.output) + os.sep
+        value['outputs'] = {name: record for name, record in value['outputs'].items()
+                            if not (name.startswith(prefix) and
+                                    runtime_output_name(name[len(prefix):]))}
+        return value
 
     def priority_record(self, value):
         old = value['inputs']
@@ -393,6 +464,8 @@ class ConfigurationCache:
                        'snapshot_sha256': hashlib.sha256(content).hexdigest(),
                        'priority_stat': dependencies.signature(self.priority_path.stat()),
                        'priority_sha256': hashlib.sha256(compact).hexdigest()}
+        if self.configured_outputs is not None:
+            self.header['configuration_output_format'] = 1
         dependencies.write_json(self.success_path, self.header)
 
     def validate_inputs(self, old, checked=None):
@@ -407,44 +480,19 @@ class ConfigurationCache:
                 validate_records(directories, 'directory', self.root))
 
     def output_paths(self):
-        paths = set()
-        if self.ninja:
-            # Query the real target graph once on capture, including generated
-            # inputs with no extension. No compile/install actions are run.
-            result = subprocess.run([self.ninja, '-w', 'dupbuild=warn', '-C', str(self.output),
-                                     '-t', 'inputs', '-0', '-E', 'make_all'],
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            output_root = str(self.root / 'out') + os.sep
-            for raw in result.stdout.split(b'\0'):
-                if raw:
-                    name = os.path.abspath(self.output / os.fsdecode(raw))
-                    if name.startswith(output_root) and os.path.isfile(name):
-                        paths.add(name)
-        loader_root = str(self.output / 'build_configs')
-        for directory, directories, files in os.walk(self.output):
-            directories[:] = [name for name in directories if name != '.incremental']
-            loader_directory = directory == loader_root or directory.startswith(loader_root + os.sep)
-            for name in files:
-                selected = (not self.ninja and os.path.splitext(name)[1] in OUTPUT_SUFFIXES)
-                selected = selected or name.endswith('.ninja') or loader_directory
-                if (selected and
-                        not name.startswith('incremental_workspace')):
-                    path = os.path.join(directory, name)
-                    # Optional installed SDK links can already be dangling in
-                    # a successful make_all. Track actual files; a previously
-                    # captured output becoming dangling still fails probe().
-                    if not (os.path.islink(path) and not os.path.exists(path)):
-                        paths.add(path)
-        paths.update(str(self.output / name) for name in
-                     ('build.ninja', 'build.ninja.d', 'build.ninja.stamp', 'args.gn'))
-        return paths
+        if self.configured_outputs is None:
+            raise ValueError('Configuration outputs were not observed before Ninja')
+        return self.configured_outputs
 
     def probe(self):
         started = time.monotonic()
         try:
-            if not self.local_header():
+            if not self.local_header(check_context=False):
                 self.invalidate()
                 self.log('configuration cache: original flow (no valid local proof)')
+                return False
+            same_context = self.header.get('context') == self.context
+            if not same_context:
                 return False
             if not self.invalidate():
                 return False
@@ -454,11 +502,12 @@ class ConfigurationCache:
                 return False
             self.previous = self.read_record()
             if (self.previous.get('version') != CACHE_VERSION or
-                    self.previous.get('context') != self.context or
+                    self.previous.get('context') != self.header.get('context') or
                     not all(str(self.output / name) in self.previous.get('outputs', {})
                             for name in ('build.ninja', 'build.ninja.d', 'build.ninja.stamp', 'args.gn'))):
                 return False
-            if not self.validate_inputs(self.previous['inputs'], priority['inputs']):
+            inputs_valid = self.validate_inputs(self.previous['inputs'], priority['inputs'])
+            if not inputs_valid:
                 self.log('configuration cache: miss (configuration inputs or membership changed)')
             elif output_records(self.previous['outputs']) != self.previous['outputs']:
                 self.log('configuration cache: miss (generated configuration changed)')
@@ -472,6 +521,7 @@ class ConfigurationCache:
         except CACHE_ERRORS as error:
             self.log('configuration cache: miss ({})'.format(error))
             self.reuse = False
+            self.can_record = False
             if not isinstance(error, OSError):
                 self.previous = {}
             self.invalidate()
@@ -498,6 +548,7 @@ class ConfigurationCache:
             self.log('configuration cache: miss (GN arguments unreadable: {})'.format(error))
             return self.reuse
         if self.reuse and self.previous.get('gn') != self.gn:
+            self.can_record = False
             self.reuse = False
             self.log('configuration cache: miss (resolved GN arguments changed)')
         return self.reuse
@@ -511,6 +562,7 @@ class ConfigurationCache:
         started = time.monotonic()
         try:
             self.inputs = self.source_snapshot(self.previous.get('inputs', {}))
+            self.configured_outputs = set(configuration_output_snapshot(self.output))
             self.log('configuration cache: captured inputs ({:.2f}s)'.format(time.monotonic() - started))
         except CACHE_ERRORS as error:
             self.inputs = None
