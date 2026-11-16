@@ -51,8 +51,18 @@ template("_write_test_module_list") {
   _plain_values = string_replace(_plain_values, " ", "")
   _native_format = false
   if (_plain_values == "") {
-    import("//build/ohos/testfwk/module_list_native.gni")
-    _native_format = module_list_native_generator_matches
+    _relative_output = rebase_path(_module_list_file, root_build_dir)
+    _inside_output = filter_include([ _relative_output ],
+                                    [
+                                      "..",
+                                      "../*",
+                                      "/*",
+                                      "*:*",
+                                    ]) == []
+    if (_inside_output) {
+      import("//build/ohos/testfwk/module_list_native.gni")
+      _native_format = module_list_native_generator_matches
+    }
   }
   if (_native_format) {
     _content = "[{\"target\": \"" + _arguments[1] + "\", \"label\": \"" +
