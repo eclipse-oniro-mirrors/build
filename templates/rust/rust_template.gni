@@ -578,7 +578,7 @@ template("ohos_rust_shared_ffi") {
                              root_build_dir)
       _cxx = rebase_path("${clang_base_path}/bin/clang++", root_build_dir)
       _rustflags += [ "-Clinker=" + _wrapper ]
-      if (!defined(rust_env)) {
+      if (!defined(rustenv)) {
         rustenv = []
       }
       rustenv += [
