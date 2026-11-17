@@ -45,6 +45,7 @@ ohos_exec_script_config = {
     "//build/ohos/packages/BUILD.gn",
     "//build/ohos/sa_profile/sa_profile.gni",
     "//build/ohos/sdk/BUILD.gn",
+    "//build/ohos/testfwk/module_list_native.gni",
     "//build/ohos_var.gni",
     "//build/templates/bpf/BUILD.gn",
     "//build/templates/common/copy.gni",

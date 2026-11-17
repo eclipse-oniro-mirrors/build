@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Huawei Device Co., Ltd.
+# Copyright (c) 2021-2026 Huawei Device Co., Ltd.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -19,6 +19,60 @@ import("//build/templates/cxx/cxx.gni")
 
 if (!is_arkui_x) {
   import("//build/rust/rustc_toolchain.gni")
+}
+
+# Keep gen_module_list_files.py's exact JSON bytes on the plain ASCII path.
+# Quoting, controls and non-ASCII text retain the original Python serializer.
+template("_write_test_module_list") {
+  assert(target_name != "")
+  _arguments = invoker.arguments
+  _module_list_file = invoker.module_list_file
+  assert(_module_list_file != "")
+  assert(
+      _arguments[0] == "--target" && _arguments[2] == "--target_label" &&
+      _arguments[4] == "--source_dir" && _arguments[6] == "--test_type" &&
+      _arguments[8] == "--output_dir" && _arguments[10] == "--module_list_file")
+  _plain_values = string_join("",
+                              [
+                                _arguments[1],
+                                _arguments[3],
+                                _arguments[5],
+                                _arguments[9],
+                                _arguments[7],
+                              ])
+  _plain_characters =
+      string_split("a b c d e f g h i j k l m n o p q r s t u v w x y z " +
+                       "A B C D E F G H I J K L M N O P Q R S T U V W X Y Z " +
+                       "0 1 2 3 4 5 6 7 8 9 _ . / : ( ) @ + , - ~",
+                   " ")
+  foreach(_character, _plain_characters) {
+    _plain_values = string_replace(_plain_values, _character, "")
+  }
+  _plain_values = string_replace(_plain_values, " ", "")
+  _native_format = false
+  if (_plain_values == "") {
+    _relative_output = rebase_path(_module_list_file, root_build_dir)
+    _inside_output = filter_include([ _relative_output ],
+                                    [
+                                      "..",
+                                      "../*",
+                                      "/*",
+                                      "*:*",
+                                    ]) == []
+    if (_inside_output) {
+      import("//build/ohos/testfwk/module_list_native.gni")
+      _native_format = module_list_native_generator_matches
+    }
+  }
+  if (_native_format) {
+    _content = "[{\"target\": \"" + _arguments[1] + "\", \"label\": \"" +
+               _arguments[3] + "\", \"source_directory\": \"" + _arguments[5] +
+               "\", \"output_directory\": \"" + _arguments[9] +
+               "\", \"test_type\": \"" + _arguments[7] + "\"}]"
+    write_file(_module_list_file, _content)
+  } else {
+    exec_script("//build/ohos/testfwk/gen_module_list_files.py", _arguments)
+  }
 }
 
 template("_testcase_resources") {
@@ -84,7 +138,6 @@ template("_ohos_test") {
 
   # generate module list file in gn stage
   if (!skip_generate_module_list_file) {
-    _gen_module_list_script = "//build/ohos/testfwk/gen_module_list_files.py"
     _arguments = [
       "--target",
       target_name,
@@ -104,7 +157,10 @@ template("_ohos_test") {
       "--module_list_file",
       rebase_path(_module_list_file, root_build_dir),
     ]
-    exec_script(_gen_module_list_script, _arguments)
+    _write_test_module_list("${target_name}__module_list") {
+      arguments = _arguments
+      module_list_file = _module_list_file
+    }
   }
 
   # copy testcase resource
@@ -188,6 +244,8 @@ template("ohos_unittest") {
     if (defined(invoker.rtti_compile_flag) && invoker.rtti_compile_flag) {
       external_deps += [ "googletest:gtest_rtti_main" ]
     } else {
+      # Preserve the existing static-library link order.
+      # NOSORT
       external_deps += [
         "googletest:gtest_main",
         "googletest:gtest",
@@ -366,7 +424,6 @@ template("_ohos_test_py") {
   assert(defined(invoker.test_type), "test_type is required.")
   assert(defined(invoker.sources), "sources is required.")
 
-  _gen_module_list_script = "//build/ohos/testfwk/gen_module_list_files.py"
   _arguments = [
     "--target",
     target_name,
@@ -393,7 +450,10 @@ template("_ohos_test_py") {
     "--module_list_file",
     rebase_path(_module_list_file, root_build_dir),
   ]
-  exec_script(_gen_module_list_script, _arguments)
+  _write_test_module_list("${target_name}__module_list") {
+    arguments = _arguments
+    module_list_file = _module_list_file
+  }
 
   _test_py_file_copy(target_name) {
     testonly = true
@@ -466,7 +526,6 @@ template("ohos_js_test") {
   assert(defined(invoker.module_out_path), "module_out_path must be defined.")
 
   # generate module list file in gn stage
-  _gen_module_list_script = "//build/ohos/testfwk/gen_module_list_files.py"
   _arguments = [
     "--target",
     target_name,
@@ -494,7 +553,10 @@ template("ohos_js_test") {
     "--module_list_file",
     rebase_path(_module_list_file, root_build_dir),
   ]
-  exec_script(_gen_module_list_script, _arguments)
+  _write_test_module_list("${target_name}__module_list") {
+    arguments = _arguments
+    module_list_file = _module_list_file
+  }
 
   # copy testcase resource
   testcase_target_name = target_name
@@ -591,7 +653,6 @@ template("ohos_js_stage_test") {
 
   # generate module list file in gn stage
   if (!skip_generate_module_list_file) {
-    _gen_module_list_script = "//build/ohos/testfwk/gen_module_list_files.py"
     _arguments = [
       "--target",
       target_name,
@@ -611,7 +672,10 @@ template("ohos_js_stage_test") {
       "--module_list_file",
       rebase_path(_module_list_file, root_build_dir),
     ]
-    exec_script(_gen_module_list_script, _arguments)
+    _write_test_module_list("${target_name}__module_list") {
+      arguments = _arguments
+      module_list_file = _module_list_file
+    }
   }
 
   assert(defined(invoker.hap_name),
@@ -867,7 +931,7 @@ template("ohos_rust_systemtest") {
 #arkts1.2 api test template
 ohos_ets_build_system_deps = "ets_frontend:ohos_ets_build_system"
 if (path_exists("//developtools/ace_ets2bundle")) {
-    ohos_ets_ui_plugins_deps = "ace_ets2bundle:ohos_ets_ui_plugins"
+  ohos_ets_ui_plugins_deps = "ace_ets2bundle:ohos_ets_ui_plugins"
 }
 
 build_sdk_path = "$root_build_dir/ohos_ets"
@@ -893,15 +957,16 @@ ohos_ets_stdlib_path =
 node_path = "//prebuilts/build-tools/common/nodejs/node-v18.20.1-linux-x64/bin"
 
 template("ohos_arkts_unittest") {
-  forward_variables_from(invoker, [
-    "module_out_path",
-    "test_files",
-    "part_name",
-    "subsystem_name",
-    "sources",
-    "external_deps",
-  ])
-  
+  forward_variables_from(invoker,
+                         [
+                           "module_out_path",
+                           "test_files",
+                           "part_name",
+                           "subsystem_name",
+                           "sources",
+                           "external_deps",
+                         ])
+
   assert(defined(module_out_path), "module_out_path must be defined.")
   assert(defined(test_files), "test_files must be defined.")
   assert(defined(part_name), "part_name must be defined.")
@@ -920,10 +985,8 @@ template("ohos_arkts_unittest") {
   if (defined(external_deps)) {
     _external_deps += external_deps
   }
-  _external_deps += [
-    ohos_ets_stdlib_deps,
-  ]
-  
+  _external_deps += [ ohos_ets_stdlib_deps ]
+
   _hap_name = target_name
 
   hypium_output_dir = "$root_out_dir/tests/arktstdd/hypium"
@@ -937,7 +1000,7 @@ template("ohos_arkts_unittest") {
   foreach(test_file, test_files) {
     _test_files_str = _test_files_str + "," + test_file
   }
-  
+
   _sources_str = ""
   foreach(src, sources) {
     _sources_str = _sources_str + "," + src
@@ -1004,7 +1067,10 @@ template("ohos_arkts_unittest") {
         }
         file_list_file = "${target_out_dir}/${target_name}_file_list.txt"
         write_file(file_list_file, file_paths)
-        args += [ "--files", rebase_path(file_list_file) ]
+        args += [
+          "--files",
+          rebase_path(file_list_file),
+        ]
       }
 
       if (defined(invoker.package)) {
@@ -1126,7 +1192,7 @@ template("ohos_arkts_unittest") {
       "--sources",
       _sources_str,
       "--arktsconfig",
-      rebase_path(_arktsconfig)
+      rebase_path(_arktsconfig),
     ]
     deps = _deps
     external_deps = _external_deps
