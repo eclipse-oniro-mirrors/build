@@ -19,6 +19,7 @@ import base64
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from functools import partial
+from types import SimpleNamespace
 import multiprocessing
 import threading
 import hashlib
@@ -1005,11 +1006,16 @@ def same_graph_content(old, new):
             and all(old[name]['sha256'] == record['sha256'] for name, record in new.items()))
 
 
-def collect_ninja_paths(root, build, tool, target='make_all', *, deps_metadata=None, reachable=None):
+def collect_ninja_paths(root, build, tool, target='make_all', *, deps_metadata=None,
+                        reachable=None, deps_snapshot=None):
     started = time.perf_counter()
     phase(f'collecting Ninja {tool}')
     if tool == 'deps' and deps_metadata is not None:
-        paths, live = collect_ninja_deps_with_outputs(root, build, reachable=reachable)
+        result = collect_ninja_deps_snapshot_outputs(root, build, deps_snapshot, reachable)
+        if result is None:
+            selected = reachable() if callable(reachable) else reachable
+            result = collect_ninja_deps_with_outputs(root, build, reachable=selected)
+        paths, live = result
         deps_metadata['live_outputs'] = live
     else:
         paths = set()
@@ -1568,6 +1574,60 @@ def collect_ninja_deps_with_outputs(root, build, *, reachable=None):
     return paths, live if valid and remaining == 0 else None
 
 
+def ninja_deps_live_blocks(root, build):
+    """Ask Ninja for live outputs without retaining its expanded header stream."""
+    header = re.compile(r'(.+): #deps ([0-9]+), deps mtime -?[0-9]+ \((?:STALE|VALID)\)')
+    live, remaining, valid = {}, 0, True
+    command = ninja_command(root, build, '-n', '-t', 'deps')
+    with subprocess.Popen(command, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL) as process:
+        for line in process.stdout:
+            if not valid:
+                continue
+            if remaining:
+                valid = line.startswith('    ')
+                remaining -= 1
+                continue
+            value = line.rstrip('\n')
+            if not value or (not line.startswith('    ') and value.endswith(': deps not found')):
+                continue
+            match = header.fullmatch(value)
+            if match is None or line.startswith('    ') or match[1] in live:
+                valid = False
+                continue
+            remaining = int(match[2])
+            live[match[1]] = remaining
+        if process.wait():
+            raise RuntimeError('Ninja deps query failed')
+    return live if valid and remaining == 0 else None
+
+
+def collect_ninja_deps_snapshot_outputs(root, build, data, reachable):
+    """Overlap Ninja's liveness query with target discovery; verify binary counts."""
+    if not data:
+        return None
+    live = ninja_deps_live_blocks(root, build)
+    if live is None:
+        return None
+    try:
+        names = [name.decode('utf-8') for name in data['names']]
+    except UnicodeError:
+        return None
+    if any(any(char in name for char in '\r\n\0') for name in names):
+        return None
+    records = {names[output]: bounds for output, bounds in data['records'].items()}
+    if any(name not in records or (records[name][1] - records[name][0]) // 4 != count
+           for name, count in live.items()):
+        return None
+    selected = reachable() if callable(reachable) else reachable
+    scoped = {name: count for name, count in live.items() if selected is None or name in selected}
+    view, ids = memoryview(data['content']), set()
+    for name in scoped:
+        start, end = records[name]
+        ids.update(view[start:end].cast('I'))
+    return {names[index].strip() for index in ids}, scoped
+
+
 def decode_ninja_deps_outputs(value, context):
     if not isinstance(value, str) or len(value) > NINJA_DEPS_INDEX_LIMIT * 2:
         return None
@@ -1668,96 +1728,176 @@ def ninja_deps_index_context(root, build, graph):
             'instance': instance_identity(root)}
 
 
+def cgroup_memory_headroom(directory, base, names):
+    available = []
+    while directory == base or base in directory.parents:
+        try:
+            limit = (directory / names[0]).read_text().strip()
+            used = int((directory / names[1]).read_text())
+            available.append(float('inf') if limit == 'max' else max(0, int(limit) - used))
+        except FileNotFoundError:
+            # The v2 hierarchy root has no memory.max. Child/ancestor files
+            # must already have been observed; a hidden/unreadable hierarchy
+            # still takes the conservative sequential path.
+            if directory == base and names[0] == 'memory.max' and available:
+                break
+            return None
+        except (OSError, ValueError):
+            return None
+        if directory == base:
+            break
+        directory = directory.parent
+    return min(available) if available else float('inf')
+
+
+def query_memory_headroom():
+    try:
+        fields = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
+        available = int(fields['MemAvailable'].split()[0]) * 1024
+        groups = Path('/proc/self/cgroup').read_text().splitlines()
+        for line in groups:
+            _, controllers, relative = line.split(':', 2)
+            if controllers and 'memory' not in controllers.split(','):
+                continue
+            base = Path('/sys/fs/cgroup/memory' if controllers else '/sys/fs/cgroup')
+            directory = base / relative.lstrip('/')
+            if not directory.is_dir():
+                directory = base
+            names = ('memory.limit_in_bytes', 'memory.usage_in_bytes') if controllers else ('memory.max', 'memory.current')
+            limit = cgroup_memory_headroom(directory, base, names)
+            if limit is None:
+                return None
+            available = min(available, limit)
+        return available
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def query_overlap_allowed(graph):
+    if graph is None or capture_worker_count() < 2:
+        return False
+    available = query_memory_headroom()
+    # Two Ninja graph instances need headroom beyond the baseline collector.
+    # Unknown/tight container limits keep the original sequential query order.
+    needed = 2 * 1024 ** 3 + 8 * sum(row['stat'][2] for row in graph.values())
+    return available is not None and available >= needed
+
+
+def capture_deps_state(build, target, cache):
+    state = SimpleNamespace(path=build / '.ninja_deps', signature=ninja_deps_signature(build))
+    state.same_scope = bool(cache and target_key(cache.get('target')) == target_key(target))
+    state.digest = digest(state.path) if state.signature is not None else None
+    check_ninja_deps_snapshot(build, state.signature)
+    state.same_deps = bool(cache and cache.get('deps_sha256') == state.digest)
+    state.previous_content = cache.get('deps_content_sha256') if cache else None
+    state.valid_content = (isinstance(state.previous_content, str) and
+                           re.fullmatch('[0-9a-f]{64}', state.previous_content))
+    state.previous_index = cache.get('deps_outputs_index') if state.same_scope else None
+    return state
+
+
+def capture_deps_index(root, build, graph, snapshot, metadata, paths):
+    if not snapshot or metadata.get('live_outputs') is None:
+        return None
+    context = ninja_deps_index_context(root, build, graph)
+    return make_ninja_deps_outputs(snapshot, metadata['live_outputs'], paths, context)
+
+
+def capture_target_selector(scope_task, graph_task, target):
+    if scope_task is None:
+        return None
+
+    def select():
+        return scope_task.result() | set(baseline_targets(target))
+
+    if not scope_task.done() and not query_overlap_allowed(graph_task.result()):
+        return select()
+    return select
+
+
 def collect_capture_inventory(root, build, target, cache, local, deps_metadata=None):
     """Collect paths using a graph-bound output index when its membership is known."""
-    same_scope = bool(cache and target_key(cache.get('target')) == target_key(target))
-    deps_path = build / '.ninja_deps'
-    deps_signature = ninja_deps_signature(build)
-    deps_digest = digest(deps_path) if deps_signature is not None else None
-    check_ninja_deps_snapshot(build, deps_signature)
-    same_deps = bool(cache and cache.get('deps_sha256') == deps_digest)
-    previous_content = cache.get('deps_content_sha256') if cache else None
-    valid_content = isinstance(previous_content, str) and re.fullmatch('[0-9a-f]{64}', previous_content)
-    previous_index = cache.get('deps_outputs_index') if same_scope else None
+    state = capture_deps_state(build, target, cache)
     directories, snapshot_state, query_metadata = {}, {}, {}
     outputs_index, indexed_candidate, used_index = None, None, False
-    workers = min(3, capture_worker_count())
     graph_started = time.perf_counter()
     scope_task = None
+
     def scoped_inputs():
-        if same_scope and same_graph_content(cache.get('graph'), graph_task.result()):
+        if state.same_scope and same_graph_content(cache.get('graph'), graph_task.result()):
             return set(cache['ninja_inputs'])
         return collect_ninja_paths(root, build, 'inputs', target)
+
     def query_deps():
         # Ninja's deps log is global. Scope it to this target's reachable outputs
         # without rerunning the inputs query when the graph content is unchanged.
-        reachable = scope_task.result() | set(baseline_targets(target)) if scope_task else None
+        reachable = capture_target_selector(scope_task, graph_task, target)
+        snapshot = identity_task.result() if identity_task else None
         return collect_ninja_paths(root, build, 'deps', target,
-                                   deps_metadata=query_metadata, reachable=reachable)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+                                   deps_metadata=query_metadata, reachable=reachable,
+                                   deps_snapshot=snapshot_state if snapshot is not None else None)
+
+    with ThreadPoolExecutor(max_workers=min(3, capture_worker_count())) as pool:
         graph_task = pool.submit(graph_content_records, root, build,
                                  cache.get('graph') if cache else None, local)
         scope_task = pool.submit(scoped_inputs) if target != 'make_all' else None
         inventory_task = pool.submit(scan_retained_depfiles, build,
                                      cache.get('depfiles') if cache else None, local,
                                      cache.get('directories') if cache else None, directories)
-        identity_task = (pool.submit(ninja_deps_content_identity, deps_path, deps_digest,
+        identity_task = (pool.submit(ninja_deps_content_identity, state.path, state.digest,
                                      snapshot_result=snapshot_state)
-                         if deps_digest is not None and (not same_deps or not valid_content) else None)
-        deps_task = (None if same_scope and (same_deps or (local and valid_content))
+                         if state.digest is not None and (not state.same_deps or not state.valid_content) else None)
+        deps_task = (None if state.same_scope and (state.same_deps or (local and state.valid_content))
                      else pool.submit(query_deps))
         content_identity = (identity_task.result() if identity_task else
-                            previous_content if deps_digest is not None and same_deps else None)
-        if (not same_deps and local and content_identity != previous_content
-                and previous_index is not None and snapshot_state):
+                            state.previous_content if state.digest is not None and state.same_deps else None)
+        if (not state.same_deps and local and content_identity != state.previous_content
+                and state.previous_index is not None and snapshot_state):
             context = ninja_deps_index_context(root, build, cache.get('graph'))
-            indexed_candidate = indexed_ninja_deps_paths(snapshot_state, previous_index, context)
-        if (not same_deps and deps_task is None and indexed_candidate is None
-                and content_identity != previous_content):
+            indexed_candidate = indexed_ninja_deps_paths(snapshot_state, state.previous_index, context)
+        if (not state.same_deps and deps_task is None and indexed_candidate is None
+                and content_identity != state.previous_content):
             deps_task = pool.submit(query_deps)
         graph = graph_task.result()
         same_graph = bool(cache and same_graph_content(cache.get('graph'), graph))
         phase(f'complete Ninja graph checked files={len(graph or {})} same_content={same_graph}', graph_started)
-        if (same_scope and not same_deps and local and same_graph and valid_content
-                and content_identity is not None and content_identity == previous_content):
-            same_deps = True
+        if (state.same_scope and not state.same_deps and local and same_graph and state.valid_content
+                and content_identity is not None and content_identity == state.previous_content):
+            state.same_deps = True
             phase('Ninja deps content unchanged; reusing dependency paths')
         inputs_task = (pool.submit(collect_ninja_paths, root, build, 'inputs', target)
-                       if not (same_scope and same_graph) and scope_task is None else None)
-        if same_scope and same_graph and same_deps:
+                       if not (state.same_scope and same_graph) and scope_task is None else None)
+        if state.same_scope and same_graph and state.same_deps:
             deps = set(cache['ninja_deps'])
-            outputs_index = previous_index if local else None
+            outputs_index = state.previous_index if local else None
         elif same_graph and indexed_candidate is not None:
             deps = indexed_candidate
-            outputs_index, used_index = previous_index, True
+            outputs_index, used_index = state.previous_index, True
             phase(f'Ninja deps paths rebuilt from active-output index paths={len(deps)}')
         else:
             # A graph-only change also needs a snapshot to bind the new index.
             # Parse it while the mandatory full Ninja query is still running.
-            if identity_task is None and deps_digest is not None:
-                identity_task = pool.submit(ninja_deps_content_identity, deps_path, deps_digest,
+            if identity_task is None and state.digest is not None:
+                identity_task = pool.submit(ninja_deps_content_identity, state.path, state.digest,
                                              snapshot_result=snapshot_state)
             deps_task = deps_task or pool.submit(query_deps)
             deps = deps_task.result()
             if identity_task is not None:
                 content_identity = identity_task.result()
-            if snapshot_state and query_metadata.get('live_outputs') is not None:
-                context = ninja_deps_index_context(root, build, graph)
-                outputs_index = make_ninja_deps_outputs(
-                    snapshot_state, query_metadata['live_outputs'], deps, context)
-        inputs = (set(cache['ninja_inputs']) if same_scope and same_graph else
+            outputs_index = capture_deps_index(root, build, graph, snapshot_state, query_metadata, deps)
+        inputs = (set(cache['ninja_inputs']) if state.same_scope and same_graph else
                   scope_task.result() if scope_task is not None else inputs_task.result())
         inventory = inventory_task.result()
         # Do not retain the large binary log through input fingerprinting.
         snapshot_state.clear()
         query_metadata.clear()
-    check_ninja_deps_snapshot(build, deps_signature)
-    phase(f'Ninja inventory reused inputs={same_scope and same_graph} '
-          f'deps={same_scope and same_graph and same_deps} indexed={used_index}')
+    check_ninja_deps_snapshot(build, state.signature)
+    phase(f'Ninja inventory reused inputs={state.same_scope and same_graph} '
+          f'deps={state.same_scope and same_graph and state.same_deps} indexed={used_index}')
     if deps_metadata is not None:
-        deps_metadata.update(content_identity=content_identity, log_signature=deps_signature,
+        deps_metadata.update(content_identity=content_identity, log_signature=state.signature,
                              outputs_index=outputs_index, used_outputs_index=used_index)
-    return graph, deps_digest, same_graph, same_deps, inputs, deps, inventory, directories
+    return graph, state.digest, same_graph, state.same_deps, inputs, deps, inventory, directories
 
 
 def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *, previous=None, cache=None):
