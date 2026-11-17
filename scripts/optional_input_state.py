@@ -64,6 +64,11 @@ def check_plans(build):
 def prepare_optional_inputs(arguments):
     from scripts.incremental_product_policy import resolve
 
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument('-p', '--product-name')
+    request, _ = parser.parse_known_args(arguments)
+    if request.product_name:
+        arguments = ['--product-name', request.product_name, *arguments]
     root = Path(__file__).resolve().parents[2]
     policy = resolve(root, arguments)
     if policy['enabled']:
