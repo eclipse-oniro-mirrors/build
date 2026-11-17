@@ -1,4 +1,4 @@
-# Copyright (c) 2021 Huawei Device Co., Ltd.
+# Copyright (c) 2021-2026 Huawei Device Co., Ltd.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -118,12 +118,35 @@ template("ohos_ndk_library") {
   }
 
   _ndk_config_output = "$target_gen_dir/$target_name.build_config"
-  _sdk_version = exec_script("//build/ohos/version.py",
-                             [
-                               "--version",
-                               sdk_version,
-                             ],
-                             "list lines")
+
+  # Preserve the sdk_version source; api_version can be overridden separately.
+  _version_suffix = string_replace(sdk_version, ".", "")
+  foreach(_digit,
+          [
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+          ]) {
+    _version_suffix = string_replace(_version_suffix, _digit, "")
+  }
+  if (_version_suffix == "" && sdk_version != "") {
+    _sdk_version = string_split(sdk_version, ".")
+  } else {
+    # Keep the original argument parsing and line trimming for unusual values.
+    _sdk_version = exec_script("//build/ohos/version.py",
+                               [
+                                 "--version",
+                                 sdk_version,
+                               ],
+                               "list lines")
+  }
   _min_compact_version = _sdk_version[0]
   if (defined(invoker.min_compact_version)) {
     _min_compact_version = invoker.min_compact_version
@@ -675,12 +698,35 @@ template("ohos_ndk_lite_library") {
   }
 
   _ndk_config_output = "$target_gen_dir/$target_name.build_config"
-  _sdk_version = exec_script("//build/ohos/version.py",
-                             [
-                               "--version",
-                               sdk_version,
-                             ],
-                             "list lines")
+
+  # Preserve the sdk_version source; api_version can be overridden separately.
+  _version_suffix = string_replace(sdk_version, ".", "")
+  foreach(_digit,
+          [
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+          ]) {
+    _version_suffix = string_replace(_version_suffix, _digit, "")
+  }
+  if (_version_suffix == "" && sdk_version != "") {
+    _sdk_version = string_split(sdk_version, ".")
+  } else {
+    # Keep the original argument parsing and line trimming for unusual values.
+    _sdk_version = exec_script("//build/ohos/version.py",
+                               [
+                                 "--version",
+                                 sdk_version,
+                               ],
+                               "list lines")
+  }
   _min_compact_version = _sdk_version[0]
   if (defined(invoker.min_compact_version)) {
     _min_compact_version = invoker.min_compact_version
@@ -769,9 +815,11 @@ template("ohos_ndk_lite_library") {
 
     _ndk_shlib_target = "${target_name}_${_toolchain_name}__ndk_shlib"
 
-    _stack_chk_stub_file = target_gen_dir + "/${target_name}.ndk/stack_chk_fail.c"
-    write_file(_stack_chk_stub_file,
-               "void __stack_chk_fail(void) { } unsigned long __stack_chk_guard = 0;")
+    _stack_chk_stub_file =
+        target_gen_dir + "/${target_name}.ndk/stack_chk_fail.c"
+    write_file(
+        _stack_chk_stub_file,
+        "void __stack_chk_fail(void) { } unsigned long __stack_chk_guard = 0;")
     _stack_protector_config = "${target_name}_${_toolchain_name}__ssp_all"
     config(_stack_protector_config) {
       cflags = [ "-fstack-protector-all" ]
