@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-# Copyright (c) 2021 Huawei Device Co., Ltd.
+# Copyright (c) 2021-2026 Huawei Device Co., Ltd.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -65,11 +65,20 @@ def _get_post_process_modules_info(post_process_modules_info_files: list, depfil
     return modules_info_list
 
 
+def _write_arm64e_module_info(path, modules, optional_output):
+    """Keep optional lists stable and remove obsolete PAC module information."""
+    if modules:
+        write_json_file(path, modules, check_changes=optional_output)
+    elif optional_output and os.path.lexists(path):
+        os.unlink(path)
+
+
 def copy_modules(system_install_info: dict, install_modules_info_file: str,
                  modules_info_file: str, module_list_file: str, arm64e_modules_info_file: str,
                  arm64e_whitelist_file: str, post_process_modules_info_files: list, platform_installed_path: str,
                  host_toolchain, is_host_product: bool, additional_system_files: dict,
-                 depfiles: list, categorized_libraries: dict):
+                 depfiles: list, categorized_libraries: dict, *,
+                 arm64e_output_optional=False):
     output_result = []
     arm64e_output_result = []
     dest_list = []
@@ -215,8 +224,8 @@ def copy_modules(system_install_info: dict, install_modules_info_file: str,
     write_file(module_list_file, '\n'.join(dest_list))
 
     # write pac only module info file
-    if arm64e_output_result:
-        write_json_file(arm64e_modules_info_file, arm64e_output_result)
+    _write_arm64e_module_info(arm64e_modules_info_file, arm64e_output_result,
+                             arm64e_output_optional)
 
 
 def main():
@@ -339,7 +348,8 @@ def main():
                  args.post_process_modules_info_files,
                  args.platform_installed_path, args.host_toolchain,
                  is_host_product, additional_system_files, depfiles,
-                 categorized_libraries)
+                 categorized_libraries,
+                 arm64e_output_optional=bool(args.completion_stamp))
 
     if os.path.exists(args.system_image_zipfile):
         os.unlink(args.system_image_zipfile)
