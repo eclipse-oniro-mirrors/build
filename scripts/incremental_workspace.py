@@ -1013,8 +1013,7 @@ def collect_ninja_paths(root, build, tool, target='make_all', *, deps_metadata=N
     if tool == 'deps' and deps_metadata is not None:
         result = collect_ninja_deps_snapshot_outputs(root, build, deps_snapshot, reachable)
         if result is None:
-            selected = reachable() if callable(reachable) else reachable
-            result = collect_ninja_deps_with_outputs(root, build, reachable=selected)
+            result = collect_ninja_deps_with_outputs(root, build, reachable=reachable)
         paths, live = result
         deps_metadata['live_outputs'] = live
     else:
@@ -1559,6 +1558,8 @@ def collect_ninja_deps_with_outputs(root, build, *, reachable=None):
             match = header.fullmatch(value)
             if match and not line.startswith('    ') and match[1] not in seen:
                 seen.add(match[1])
+                if callable(reachable):
+                    reachable = reachable()
                 selected = reachable is None or match[1] in reachable
                 if selected:
                     live[match[1]] = int(match[2])
@@ -1728,61 +1729,6 @@ def ninja_deps_index_context(root, build, graph):
             'instance': instance_identity(root)}
 
 
-def cgroup_memory_headroom(directory, base, names):
-    available = []
-    while directory == base or base in directory.parents:
-        try:
-            limit = (directory / names[0]).read_text().strip()
-            used = int((directory / names[1]).read_text())
-            available.append(float('inf') if limit == 'max' else max(0, int(limit) - used))
-        except FileNotFoundError:
-            # The v2 hierarchy root has no memory.max. Child/ancestor files
-            # must already have been observed; a hidden/unreadable hierarchy
-            # still takes the conservative sequential path.
-            if directory == base and names[0] == 'memory.max' and available:
-                break
-            return None
-        except (OSError, ValueError):
-            return None
-        if directory == base:
-            break
-        directory = directory.parent
-    return min(available) if available else float('inf')
-
-
-def query_memory_headroom():
-    try:
-        fields = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
-        available = int(fields['MemAvailable'].split()[0]) * 1024
-        groups = Path('/proc/self/cgroup').read_text().splitlines()
-        for line in groups:
-            _, controllers, relative = line.split(':', 2)
-            if controllers and 'memory' not in controllers.split(','):
-                continue
-            base = Path('/sys/fs/cgroup/memory' if controllers else '/sys/fs/cgroup')
-            directory = base / relative.lstrip('/')
-            if not directory.is_dir():
-                directory = base
-            names = ('memory.limit_in_bytes', 'memory.usage_in_bytes') if controllers else ('memory.max', 'memory.current')
-            limit = cgroup_memory_headroom(directory, base, names)
-            if limit is None:
-                return None
-            available = min(available, limit)
-        return available
-    except (OSError, ValueError, KeyError):
-        return None
-
-
-def query_overlap_allowed(graph):
-    if graph is None or capture_worker_count() < 2:
-        return False
-    available = query_memory_headroom()
-    # Two Ninja graph instances need headroom beyond the baseline collector.
-    # Unknown/tight container limits keep the original sequential query order.
-    needed = 2 * 1024 ** 3 + 8 * sum(row['stat'][2] for row in graph.values())
-    return available is not None and available >= needed
-
-
 def capture_deps_state(build, target, cache):
     state = SimpleNamespace(path=build / '.ninja_deps', signature=ninja_deps_signature(build))
     state.same_scope = bool(cache and target_key(cache.get('target')) == target_key(target))
@@ -1803,15 +1749,13 @@ def capture_deps_index(root, build, graph, snapshot, metadata, paths):
     return make_ninja_deps_outputs(snapshot, metadata['live_outputs'], paths, context)
 
 
-def capture_target_selector(scope_task, graph_task, target):
+def capture_target_selector(scope_task, target):
     if scope_task is None:
         return None
 
     def select():
         return scope_task.result() | set(baseline_targets(target))
 
-    if not scope_task.done() and not query_overlap_allowed(graph_task.result()):
-        return select()
     return select
 
 
@@ -1831,13 +1775,13 @@ def collect_capture_inventory(root, build, target, cache, local, deps_metadata=N
     def query_deps():
         # Ninja's deps log is global. Scope it to this target's reachable outputs
         # without rerunning the inputs query when the graph content is unchanged.
-        reachable = capture_target_selector(scope_task, graph_task, target)
+        reachable = capture_target_selector(scope_task, target)
         snapshot = identity_task.result() if identity_task else None
         return collect_ninja_paths(root, build, 'deps', target,
                                    deps_metadata=query_metadata, reachable=reachable,
                                    deps_snapshot=snapshot_state if snapshot is not None else None)
 
-    with ThreadPoolExecutor(max_workers=min(3, capture_worker_count())) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         graph_task = pool.submit(graph_content_records, root, build,
                                  cache.get('graph') if cache else None, local)
         scope_task = pool.submit(scoped_inputs) if target != 'make_all' else None
