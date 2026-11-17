@@ -955,10 +955,10 @@ def resolve_cached(path, cache):
 def continued_ninja_line(content, start):
     """Do not interpret a continued command/value as a pool declaration."""
     end = start - 2
-    if end >= 0 and content[end] == 13:
+    if end >= 0 and content[end] == ord('\r'):
         end -= 1
     cursor = end
-    while cursor >= 0 and content[cursor] == 36:
+    while cursor >= 0 and content[cursor] == ord('$'):
         cursor -= 1
     return (end - cursor) % 2 == 1
 
