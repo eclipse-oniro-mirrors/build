@@ -747,45 +747,50 @@ def cloned_signature(before, current, devices):
     return True
 
 
-def cloned_collection_record(build, field, name, record, devices):
-    path = build if field == 'directories' and name == '.' else build / name
-    # Even equal device numbers on different servers are not proof.
-    # A rejected record must force its ordinary content/listing read.
-    result = dict(record, stat=None)
-    if field == 'directories':
-        result['timestamp_stable'] = False
-    try:
-        info = path.stat() if field == 'graph' or name == '.' else path.lstat()
-        signature = file_signature(info)
-        if field == 'directories':
-            signature.append(info.st_nlink)
-        if cloned_signature(record.get('stat'), signature, devices):
-            result = dict(record, stat=signature)
-    except (FileNotFoundError, NotADirectoryError):
-        pass
-    return result
+class ClonedCollectionRecords(dict):
+    """Keep a transient volume proof alongside unmodified cached records."""
+
+    def __init__(self, records, devices):
+        super().__init__(records)
+        self.devices = devices
+
+
+def matching_collection_signature(before, current, local, devices):
+    """Check clone identity at the collector's normal metadata observation."""
+    if devices is not None:
+        return cloned_signature(before, current, devices)
+    return local and before == current
+
+
+def report_graph_changes(previous, current):
+    """Describe cache invalidation from already collected hashes, without I/O."""
+    if previous is None or current is None:
+        phase('Ninja graph comparison unavailable; using complete tool queries')
+        return
+    added, removed = current.keys() - previous.keys(), previous.keys() - current.keys()
+    modified = {name for name in previous.keys() & current.keys()
+                if previous[name]['sha256'] != current[name]['sha256']}
+    sample = sorted(added | removed | modified)[:8]
+    phase(f'Ninja graph changes added={len(added)} removed={len(removed)} '
+          f'modified={len(modified)} sample={json.dumps(sample)}')
+
 
 
 def rebase_cloned_collection(root, build, cache):
     devices = cloned_device(root, build, cache.get('filesystem_proof'), cache.get('instance'))
     if devices is None:
         return cache
-    # Only already indexed paths are visited. Changed/new directory membership
-    # is still discovered by the normal inventory collector below.
-    if not all(isinstance(cache.get(field), dict) for field in
-               ('graph', 'directories', 'depfiles')):
+    fields = ('graph', 'directories', 'depfiles')
+    if not all(isinstance(cache.get(field), dict) for field in fields):
         return cache
-    result = dict(cache)
-    for field in ('graph', 'directories', 'depfiles'):
-        entries = dict(cache.get(field, {}))
-        for name, record in entries.items():
-            if not isinstance(record, dict):
-                return None
-            entries[name] = cloned_collection_record(build, field, name, record, devices)
-        result[field] = entries
-    result['instance'] = local_collection_identity(root)
-    result['clone_rebased'] = True
-    phase('matching cloned filesystem: verifying indexed metadata before reuse')
+    if any(not isinstance(record, dict) for field in fields for record in cache[field].values()):
+        return None
+    # Carry only the volume proof. Each collector verifies the full old/new
+    # signature when it already observes that path, before reusing any content.
+    result = dict(cache, instance=local_collection_identity(root), clone_rebased=True)
+    for field in fields:
+        result[field] = ClonedCollectionRecords(cache[field], devices)
+    phase('matching cloned filesystem: verifying indexed metadata during collection')
     return result
 
 
@@ -958,6 +963,7 @@ def graph_content_records(root, build, previous, local):
     GN emits literal includes. Arbitrary Ninja variable expansion is deliberately
     not approximated: Ninja itself will rediscover inputs on that fallback path.
     """
+    devices = getattr(previous, 'devices', None)
     build_base = os.path.abspath(build)
     records, pending = {}, [os.path.join(build_base, 'build.ninja')]
     resolutions = {}
@@ -976,8 +982,8 @@ def graph_content_records(root, build, previous, local):
             return None
         signature = file_signature(os.stat(path))
         cached = old.get(relative)
-        if local and cached and cached.get('stat') == signature:
-            record = cached
+        if cached and matching_collection_signature(cached.get('stat'), signature, local, devices):
+            record = dict(cached, stat=signature) if devices is not None else cached
         else:
             content, signature = stable_bytes(Path(path))
             children = []
@@ -997,6 +1003,8 @@ def graph_content_records(root, build, previous, local):
         if time.perf_counter() >= progress:
             phase(f'complete Ninja graph progress files={len(records)}')
             progress = time.perf_counter() + 2
+    if devices is not None and not same_graph_content(previous, records):
+        report_graph_changes(previous, records)
     return records
 
 
@@ -1184,13 +1192,15 @@ def fingerprint_batches(items, record_input, workers):
 
 def directory_stat_changes(context):
     """Check complete directory metadata without traversing cached children."""
-    build, entries = context
+    build, entries, devices = context
     changed = []
     for name, expected in entries:
         path = build if name == '.' else os.path.join(build, name)
         try:
             current = os.stat(path, follow_symlinks=name == '.')
-            if file_signature(current) + [current.st_nlink] != expected:
+            signature = file_signature(current) + [current.st_nlink]
+            matches = cloned_signature(expected, signature, devices) if devices is not None else signature == expected
+            if not matches:
                 changed.append(name)
         except OSError:
             # An obsolete cached child may no longer be reachable. Defer its
@@ -1199,12 +1209,12 @@ def directory_stat_changes(context):
     return changed
 
 
-def checked_directory_changes(pool, build, entries, workers):
+def checked_directory_changes(pool, build, entries, workers, devices=None):
     """Bound queued metadata checks and retain only mismatching names."""
     changed = set()
     window = 2 * workers * 1024
     for offset in range(0, len(entries), window):
-        contexts = ((build, entries[index:index + 1024]) for index in range(
+        contexts = ((build, entries[index:index + 1024], devices) for index in range(
             offset, min(offset + window, len(entries)), 1024))
         for names in pool.map(directory_stat_changes, contexts):
             changed.update(names)
@@ -1237,9 +1247,22 @@ def read_stable_depfile_directory(path, before, signature, excluded, follow_root
     raise RuntimeError(f'Output directory changed while collecting depfiles: {path}')
 
 
+def observe_depfile_directory(build_path, name, cached, local, devices):
+    path = build_path if name == '.' else os.path.join(build_path, name)
+    before = os.stat(path, follow_symlinks=name == '.')
+    if name != '.' and stat_module.S_ISLNK(before.st_mode):
+        return None, False
+    signature = file_signature(before) + [before.st_nlink]
+    if (cached and cached.get('timestamp_stable') and
+            matching_collection_signature(cached.get('stat'), signature, local, devices)):
+        return (dict(cached, stat=signature) if devices is not None else cached), True
+    excluded = {'.cache', 'lsp-portable', '.clangd-lsp-work', '.git', '.incremental'}
+    return read_stable_depfile_directory(path, before, signature, excluded, name == '.'), False
+
+
 def depfile_inventory(build, previous=None, local=False, directory_index=None):
     """Rescan changed directories; stat checks preserve discovery of added files."""
-    excluded = {'.cache', 'lsp-portable', '.clangd-lsp-work', '.git', '.incremental'}
+    devices = getattr(previous, 'devices', None)
     old = previous or {}
     # Keep cached directory names as strings; only emitted depfiles need Paths.
     # Every reachable directory still gets the same complete stat check.
@@ -1256,7 +1279,7 @@ def depfile_inventory(build, previous=None, local=False, directory_index=None):
             pool = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn'))
             entries = [(name, record['stat']) for name, record in old.items()
                        if record.get('timestamp_stable')]
-            changed = checked_directory_changes(pool, build_path, entries, workers)
+            changed = checked_directory_changes(pool, build_path, entries, workers, devices)
             checked = {name for name, _ in entries} - changed
             phase(f'depfile directory checks workers={workers} cached={len(entries)} changed={len(changed)}')
         while pending:
@@ -1264,18 +1287,14 @@ def depfile_inventory(build, previous=None, local=False, directory_index=None):
             path = build_path if name == '.' else os.path.join(build_path, name)
             cached = old.get(name)
             if checked is not None and name in checked:
-                record = cached
+                record = (dict(cached, stat=[devices[1], *cached['stat'][1:]])
+                          if devices is not None else cached)
                 reused += 1
             else:
-                before = os.stat(path, follow_symlinks=name == '.')
-                if name != '.' and stat_module.S_ISLNK(before.st_mode):
+                record, was_reused = observe_depfile_directory(build_path, name, cached, local, devices)
+                if record is None:
                     continue
-                signature = file_signature(before) + [before.st_nlink]
-                if local and cached and cached.get('timestamp_stable') and cached['stat'] == signature:
-                    record = cached
-                    reused += 1
-                else:
-                    record = read_stable_depfile_directory(path, before, signature, excluded, name == '.')
+                reused += was_reused
             scanned += 1
             if pool is not None:
                 observed.append((name, record['stat']))
@@ -1399,10 +1418,12 @@ def collect_retained_depfiles(build, paths, target, *, previous=None, local=Fals
     return records
 
 
-def retained_depfile_record(path, cached, local):
-    signature = file_signature(path.stat())
-    if local and cached and cached.get('stat') == signature:
-        return cached.copy(), True
+def retained_depfile_record(path, cached, local, devices=None):
+    info = path.lstat() if devices is not None else path.stat()
+    signature = file_signature(info)
+    if (cached and not stat_module.S_ISLNK(info.st_mode) and
+            matching_collection_signature(cached.get('stat'), signature, local, devices)):
+        return dict(cached, stat=signature), True
     content, signature = stable_bytes(path)
     fingerprint = hashlib.sha256(content).hexdigest()
     if cached and cached.get('sha256') == fingerprint:
@@ -1429,12 +1450,13 @@ def pack_depfile_inputs(rules):
 def scan_retained_depfiles(build, previous=None, local=False, directories=None, directory_index=None):
     """Read the complete depfile inventory independently of the Ninja input set."""
     started = time.perf_counter()
+    devices = getattr(previous, 'devices', None)
     old, parsed, producers = previous or {}, {}, {}
     build_base = os.path.abspath(build)
     reused, retained_bytes = 0, 0
     for path in depfile_inventory(build, directories, local, directory_index):
         relative = str(path.relative_to(build))
-        record, cached = retained_depfile_record(path, old.get(relative), local)
+        record, cached = retained_depfile_record(path, old.get(relative), local, devices)
         reused += cached
         if record['rules'] is not None:
             record['packed_inputs'] = pack_depfile_inputs(record['rules'])
