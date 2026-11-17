@@ -24,10 +24,11 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import uuid
 
 
-def record(path):
+def record(path, *, contents=True):
     before = path.lstat()
     result = {'mode': stat.S_IMODE(before.st_mode)}
     if stat.S_ISLNK(before.st_mode):
@@ -35,11 +36,13 @@ def record(path):
     elif stat.S_ISDIR(before.st_mode):
         result.update(kind='directory')
     elif stat.S_ISREG(before.st_mode):
-        digest = hashlib.sha256()
-        with path.open('rb') as source:
-            for content in iter(lambda: source.read(1024 * 1024), b''):
-                digest.update(content)
-        result.update(kind='file', sha256=digest.hexdigest(), size=before.st_size)
+        result.update(kind='file', size=before.st_size)
+        if contents:
+            digest = hashlib.sha256()
+            with path.open('rb') as source:
+                for content in iter(lambda: source.read(1024 * 1024), b''):
+                    digest.update(content)
+            result['sha256'] = digest.hexdigest()
     else:
         raise ValueError('Unsupported copy input: ' + str(path))
     after = path.lstat()
@@ -55,16 +58,17 @@ def within(name, parent):
 
 def tree(path, excluded=()):
     result = {'.': record(path)}
-    if result['.']['kind'] == 'directory':
-        for parent, directories, files in os.walk(path, followlinks=False):
-            for name in list(directories) + files:
-                item = Path(parent) / name
-                relative = item.relative_to(path)
-                if any(within(relative, value) for value in excluded):
-                    if name in directories:
-                        directories.remove(name)
-                    continue
-                result[str(relative)] = record(item)
+    if result['.']['kind'] != 'directory':
+        return result
+    for parent, directories, files in os.walk(path, followlinks=False):
+        for name in list(directories) + files:
+            item = Path(parent) / name
+            relative = item.relative_to(path)
+            if any(within(relative, value) for value in excluded):
+                if name in directories:
+                    directories.remove(name)
+                continue
+            result[str(relative)] = record(item)
     return result
 
 
@@ -103,12 +107,41 @@ def relative_exclusions(destination, values):
     return tuple(sorted(result))
 
 
-def copy_outputs(pairs, state_path, stamp_path, depfile_path, preserve=(), caches=(), declare_roots=False):
-    try:
-        previous = json.loads(state_path.read_text())
-    except (OSError, ValueError):
-        previous = {}
-    plans, rows, dependencies = [], {}, set()
+def apply_payload_copy(source, destination, desired, existing, excluded, state_path):
+    for name, expected in sorted(desired.items(), key=lambda item: len(Path(item[0]).parts)):
+        old = existing.get(name)
+        if old is not None and old['kind'] != expected['kind']:
+            target = destination if name == '.' else destination / name
+            if old['kind'] == 'directory' and any(target.iterdir()):
+                raise RuntimeError('Conflicting output directory: ' + str(target))
+            remove(target)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if desired['.']['kind'] != 'directory':
+        remove(destination)
+        try:
+            os.link(source, destination, follow_symlinks=False)
+        except OSError:
+            subprocess.run(['cp', '-af', '--', str(source), str(destination)], check=True)
+        return
+    destination.mkdir(exist_ok=True)
+    # GNU cp preserves modes, links, xattrs and hard-link groups. Filter a
+    # private snapshot so no other contribution is copied. Shared destination
+    # ancestors may be cleaned by another contributor; stage beside our state.
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.directory-copy-', dir=state_path.parent) as temporary:
+        snapshot = Path(temporary) / 'payload'
+        subprocess.run(['cp', '-af', '--', str(source), str(snapshot)], check=True)
+        for relative in excluded:
+            candidate = snapshot / relative
+            if candidate.is_symlink() or candidate.exists():
+                remove(candidate)
+        if tree(snapshot, excluded) != desired:
+            raise RuntimeError('Copy input changed while taking snapshot: ' + str(source))
+        subprocess.run(['cp', '-af', '--', str(snapshot) + '/.', str(destination)], check=True)
+
+
+def make_copy_plans(pairs, preserve, caches):
+    plans, rows = [], {}
     # Validate all sources and ownership boundaries before changing outputs.
     for source, destination in pairs:
         source, destination = Path(os.path.abspath(source)), Path(os.path.abspath(destination))
@@ -131,6 +164,42 @@ def copy_outputs(pairs, state_path, stamp_path, depfile_path, preserve=(), cache
         rows[str(destination)] = {'source': str(source), 'entries': desired,
                                   'preserve': list(map(str, kept)), 'caches': list(map(str, discarded))}
         plans.append((source, destination, desired, kept, discarded))
+    return plans, rows
+
+
+def prune_stale_names(destination, existing, desired, excluded):
+    # The contribution owns every non-excluded name, even without a cache.
+    # Keep ancestors needed by other contributors; never follow symlinks.
+    removed = False
+    for name in sorted(existing.keys() - desired.keys(), key=len, reverse=True):
+        relative = Path(name)
+        if name == '.' or any(within(value, relative) for value in excluded):
+            continue
+        target = destination / relative
+        if target.is_symlink() or not target.is_dir():
+            target.unlink(missing_ok=True)
+        else:
+            target.rmdir()
+        removed = True
+    return removed
+
+
+def discard_runtime_caches(plans):
+    for _, destination, _, _, discarded in plans:
+        for relative in discarded:
+            path = destination / relative
+            if path.is_symlink() or path.exists():
+                remove(path)
+
+
+def copy_outputs(pairs, state_path, stamp_path, depfile_path, preserve=(), caches=(), declare_roots=False,
+                 publication=None, published_state=None):
+    try:
+        previous = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        previous = {}
+    plans, rows = make_copy_plans(pairs, preserve, caches)
+    dependencies = set()
     repair = previous.get('repair') if isinstance(previous, dict) else None
     state = {'version': 2, 'copies': rows, 'repair': repair}
     changed = previous != state
@@ -146,52 +215,12 @@ def copy_outputs(pairs, state_path, stamp_path, depfile_path, preserve=(), cache
             existing = tree(destination, excluded)
         except (FileNotFoundError, NotADirectoryError):
             existing = {}
-        # The contribution owns every non-excluded name, even without a cache.
-        # Keep ancestors needed by other contributors; never follow symlinks.
-        for name in sorted(existing.keys() - desired.keys(), key=len, reverse=True):
-            relative = Path(name)
-            if name == '.' or any(within(value, relative) for value in excluded):
-                continue
-            target = destination / relative
-            if target.is_symlink() or not target.is_dir():
-                target.unlink(missing_ok=True)
-            else:
-                target.rmdir()
+        if prune_stale_names(destination, existing, desired, excluded):
             changed = True
             repaired = True
         needs_copy = any(existing.get(name) != value for name, value in desired.items())
         if needs_copy:
-            for name, expected in sorted(desired.items(), key=lambda item: len(Path(item[0]).parts)):
-                old = existing.get(name)
-                if old is not None and old['kind'] != expected['kind']:
-                    target = destination if name == '.' else destination / name
-                    if old['kind'] == 'directory' and any(target.iterdir()):
-                        raise RuntimeError('Conflicting output directory: ' + str(target))
-                    remove(target)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if desired['.']['kind'] == 'directory':
-                destination.mkdir(exist_ok=True)
-                # GNU cp preserves modes, links, xattrs and hard-link groups.
-                # Filter a private snapshot so no other contribution is copied.
-                # Shared destination ancestors may be cleaned by another
-                # contributor. Keep staging beside our private state instead.
-                state_path.parent.mkdir(parents=True, exist_ok=True)
-                with tempfile.TemporaryDirectory(prefix='.directory-copy-', dir=state_path.parent) as temporary:
-                    snapshot = Path(temporary) / 'payload'
-                    subprocess.run(['cp', '-af', '--', str(source), str(snapshot)], check=True)
-                    for relative in excluded:
-                        candidate = snapshot / relative
-                        if candidate.is_symlink() or candidate.exists():
-                            remove(candidate)
-                    if tree(snapshot, excluded) != desired:
-                        raise RuntimeError('Copy input changed while taking snapshot: ' + str(source))
-                    subprocess.run(['cp', '-af', '--', str(snapshot) + '/.', str(destination)], check=True)
-            else:
-                remove(destination)
-                try:
-                    os.link(source, destination, follow_symlinks=False)
-                except OSError:
-                    subprocess.run(['cp', '-af', '--', str(source), str(destination)], check=True)
+            apply_payload_copy(source, destination, desired, existing, excluded, state_path)
             changed = True
             repaired = True
         if tree(source, excluded) != desired:
@@ -208,18 +237,108 @@ def copy_outputs(pairs, state_path, stamp_path, depfile_path, preserve=(), cache
     if repaired:
         state['repair'] = uuid.uuid4().hex
     if changed:
-        for _, destination, _, _, discarded in plans:
-            for relative in discarded:
-                path = destination / relative
-                if path.is_symlink() or path.exists():
-                    remove(path)
+        discard_runtime_caches(plans)
     write_changed(state_path, json.dumps(state, sort_keys=True, separators=(',', ':')) + '\n')
+    if publication is not None:
+        write_changed(publication, publication_content(state, published_state or publication))
     depfile = make_escape(os.path.relpath(stamp_path)) + ': ' + ' '.join(
         make_escape(os.path.relpath(name)) for name in sorted(dependencies)) + '\n'
     write_changed(depfile_path, depfile)
     if changed or not stamp_path.exists():
         stamp_path.parent.mkdir(parents=True, exist_ok=True)
         stamp_path.touch()
+
+
+def publication_content(data, destination):
+    semantic = hashlib.sha256(json.dumps(data['copies'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    try:
+        previous = json.loads(destination.read_text())
+    except (OSError, ValueError):
+        previous = {}
+    if not isinstance(previous, dict):
+        previous = {}
+    # A missing cache does not lose the last published repair identity. Actual
+    # payload repairs have their own new token and must invalidate consumers.
+    repair = data.get('repair') or previous.get('repair')
+    return json.dumps({'semantic': semantic, 'repair': repair}, sort_keys=True) + '\n'
+
+
+def root_entries_match(path, row):
+    """Check the roots omitted from the copier's self-dependency-free depfile."""
+    expected = row['entries']
+    if record(path) != expected['.']:
+        return False
+    if expected['.']['kind'] != 'directory':
+        return True
+    excluded = tuple(Path(value) for value in row['preserve'] + row['caches'])
+    actual = {}
+    for child in path.iterdir():
+        name = Path(child.name)
+        if any(within(name, value) for value in excluded):
+            continue
+        if child.name not in expected and any(within(value, name) for value in excluded):
+            continue
+        # Ordinary child files already appear in the payload depfile. Root
+        # membership and symlink targets need this check; rehashing those
+        # declared child inputs would duplicate Ninja/entry verification.
+        actual[child.name] = record(child, contents=False)
+    wanted = {name: {key: item for key, item in value.items() if key != 'sha256'}
+              for name, value in expected.items() if name != '.' and len(Path(name).parts) == 1}
+    return actual == wanted
+
+
+def plan_path(build, value):
+    path = build / value
+    if Path(value).is_absolute() or '..' in Path(value).parts:
+        raise ValueError('Invalid directory copy plan path: ' + value)
+    if build.resolve() not in path.parent.resolve().parents and path.parent.resolve() != build.resolve():
+        raise ValueError('Directory copy plan escapes the build directory: ' + value)
+    return path
+
+
+def check_root_plan(build, plan):
+    if plan.get('version') != 1:
+        raise ValueError('Unsupported directory copy plan')
+    publication = plan_path(build, plan['publication'])
+    if not publication.exists():
+        return False  # Ninja already has a missing declared output to rebuild.
+    state, stamp = plan_path(build, plan['state']), plan_path(build, plan['stamp'])
+    try:
+        ceiling = stamp.stat().st_mtime_ns
+        changed_state = state.stat().st_mtime_ns > ceiling
+        roots = [plan_path(build, name) for name in plan['roots']]
+        data = json.loads(state.read_text())
+        matches = (data.get('version') == 2 and
+                   set(data['copies']) == {str(path.absolute()) for path in roots} and
+                   all(root_entries_match(path, data['copies'][str(path.absolute())]) for path in roots))
+        if not changed_state and matches:
+            return False
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError):
+        pass
+    # Invalidate only our disposable metadata. Ninja then runs the real copier,
+    # which repairs payloads and publishes a fresh repair token for consumers.
+    publication.unlink(missing_ok=True)
+    return True
+
+
+def check_root_plans(build):
+    started = time.perf_counter()
+    checked, invalidated = 0, 0
+    for path in sorted((build / '.directory_copy_plans').glob('**/*.json')):
+        plan = json.loads(path.read_text())
+        invalidated += check_root_plan(build, plan)
+        checked += 1
+    if checked:
+        print(f'directory copy: root plans checked={checked} invalidated={invalidated} '
+              f'elapsed_s={time.perf_counter() - started:.3f}', flush=True)
+
+
+def prepare_registered_roots(root, arguments):
+    from scripts.incremental_product_policy import resolve
+
+    policy = resolve(root, arguments)
+    if policy['enabled']:
+        check_root_plans(Path(root) / policy['build_dir'])
 
 
 def publish_state(source, destination):
@@ -233,37 +352,33 @@ def publish_state(source, destination):
                   if name in row['entries'] or not any(within(path, Path(name)) for path in excluded)}
         if actual != row['entries']:
             raise RuntimeError('Directory contribution changed after generation: ' + root)
-    semantic = hashlib.sha256(json.dumps(data['copies'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    try:
-        previous = json.loads(destination.read_text())
-    except (OSError, ValueError):
-        previous = {}
-    if not isinstance(previous, dict):
-        previous = {}
-    # A missing cache does not lose the last published repair identity. Actual
-    # payload repairs have their own new token and must invalidate consumers.
-    repair = data.get('repair') or previous.get('repair')
-    write_changed(destination, json.dumps({'semantic': semantic, 'repair': repair}, sort_keys=True) + '\n')
+    write_changed(destination, publication_content(data, destination))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--publish-state', nargs=2, type=Path)
+    parser.add_argument('--check-root-plans', type=Path)
     parser.add_argument('--pair', nargs=2, action='append')
     parser.add_argument('--preserve', action='append', default=[])
     parser.add_argument('--discard-cache', action='append', default=[])
     parser.add_argument('--declare-roots', action='store_true')
+    parser.add_argument('--publication', type=Path)
+    parser.add_argument('--published-state', type=Path)
     parser.add_argument('--state', type=Path)
     parser.add_argument('--stamp', type=Path)
     parser.add_argument('--depfile', type=Path)
     args = parser.parse_args()
-    if args.publish_state:
+    if args.check_root_plans:
+        check_root_plans(args.check_root_plans)
+    elif args.publish_state:
         publish_state(*args.publish_state)
     else:
         if not all([args.pair, args.state, args.stamp, args.depfile]):
             parser.error('copying requires --pair, --state, --stamp and --depfile')
         copy_outputs(args.pair, args.state, args.stamp, args.depfile,
-                     args.preserve, args.discard_cache, args.declare_roots)
+                     args.preserve, args.discard_cache, args.declare_roots,
+                     args.publication, args.published_state)
 
 
 if __name__ == '__main__':
