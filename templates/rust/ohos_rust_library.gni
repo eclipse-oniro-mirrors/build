@@ -122,13 +122,18 @@ template("ohos_rust_library") {
       module_type = "rust_library"
 
       module_name = _main_target_name
-      if (defined(invoker.crate_name)) {
+      if (defined(invoker.notice_name)) {
+        # Optional override for parts exposing two targets with the same
+        # crate_name (e.g. rlib + dylib flavors): the default crate_name-based
+        # notice file name would collide ("Duplicate output file").
+        module_name = invoker.notice_name
+      } else if (defined(invoker.crate_name)) {
         module_name = invoker.crate_name
       }
       module_source_dir = get_label_info(":${_main_target_name}", "dir")
     }
   }
-  
+
   # auto set auto_relative_install_dir by innerapi_tags
   if (defined(invoker.innerapi_tags)) {
     is_chipsetsdk = false
