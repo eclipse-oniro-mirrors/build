@@ -80,7 +80,7 @@ def ordinary_storage(path):
         return False
     descriptor = None
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
         flags = bytearray(8)
         fcntl.ioctl(descriptor, 0x80086601, flags, True)  # FS_IOC_GETFLAGS
         # Extent/index implementation bits do not change copy semantics.
@@ -149,10 +149,16 @@ class PreviousInstallation:
         self.token = _ACTIVE.set(self if self.lock is not None else None)
         return self
 
-    def _supported_platform(self):
-        current = os.lstat(self.platform)
-        return (current.st_uid == os.geteuid() and current.st_gid == os.getegid() and
-                not os.listxattr(self.platform) and ordinary_storage(self.platform))
+    def __exit__(self, exception_type, exception, traceback):
+        _ACTIVE.reset(self.token)
+        try:
+            if exception_type is None:
+                self.finish()
+            elif self.backup is not None:
+                shutil.rmtree(self.backup)
+        finally:
+            self._unlock()
+        return False
 
     def is_source_file(self, path):
         try:
@@ -162,6 +168,41 @@ class PreviousInstallation:
         regular = stat.S_ISREG(current.st_mode)
         self.large_source_seen |= regular and current.st_size >= MINIMUM_BYTES
         return regular
+
+    def finish(self):
+        """Complete cleanup before publishing an action's successful output."""
+        if self.finished:
+            return
+        if self.backup is not None:
+            shutil.rmtree(self.backup)
+            self.backup = None
+        if self.lock is not None:
+            self._write_hint()
+        self.finished = True
+
+    def previous_file(self, destination):
+        try:
+            relative = Path(destination).absolute().relative_to(self.platform)
+        except ValueError:
+            return None
+        return self.backup / relative
+
+    def copy2(self, source, destination, *, follow_symlinks=True):
+        source_stat = os.lstat(source)
+        if source_stat.st_size < MINIMUM_BYTES or not stat.S_ISREG(source_stat.st_mode):
+            return shutil.copy2(source, destination, follow_symlinks=follow_symlinks)
+        self.large_source_seen = True
+        if os.path.isdir(destination):
+            destination = os.path.join(destination, os.path.basename(source))
+        previous = self.previous_file(destination)
+        if previous is not None and self._reuse(source, previous, destination):
+            return destination
+        return shutil.copy2(source, destination, follow_symlinks=follow_symlinks)
+
+    def _supported_platform(self):
+        current = os.lstat(self.platform)
+        return (current.st_uid == os.geteuid() and current.st_gid == os.getegid() and
+                not os.listxattr(self.platform) and ordinary_storage(self.platform))
 
     def _read_hint(self):
         try:
@@ -181,9 +222,10 @@ class PreviousInstallation:
         except (OSError, UnicodeError):
             pass
         try:
-            descriptor, name = tempfile.mkstemp(prefix='hint-', dir=self.cache)
-            temporary = Path(name)
-            with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                             prefix='hint-', dir=self.cache,
+                                             delete=False) as output:
+                temporary = output.name
                 output.write(content)
             os.replace(temporary, target)
         except OSError:
@@ -191,7 +233,7 @@ class PreviousInstallation:
         finally:
             if temporary is not None:
                 try:
-                    temporary.unlink(missing_ok=True)
+                    os.remove(temporary)
                 except OSError:
                     pass
 
@@ -267,47 +309,6 @@ class PreviousInstallation:
         if self.lock is not None:
             self.lock.close()
             self.lock = None
-
-    def __exit__(self, exception_type, exception, traceback):
-        _ACTIVE.reset(self.token)
-        try:
-            if exception_type is None:
-                self.finish()
-            elif self.backup is not None:
-                shutil.rmtree(self.backup)
-        finally:
-            self._unlock()
-        return False
-
-    def finish(self):
-        """Complete cleanup before publishing an action's successful output."""
-        if self.finished:
-            return
-        if self.backup is not None:
-            shutil.rmtree(self.backup)
-            self.backup = None
-        if self.lock is not None:
-            self._write_hint()
-        self.finished = True
-
-    def previous_file(self, destination):
-        try:
-            relative = Path(destination).absolute().relative_to(self.platform)
-        except ValueError:
-            return None
-        return self.backup / relative
-
-    def copy2(self, source, destination, *, follow_symlinks=True):
-        source_stat = os.lstat(source)
-        if source_stat.st_size < MINIMUM_BYTES or not stat.S_ISREG(source_stat.st_mode):
-            return shutil.copy2(source, destination, follow_symlinks=follow_symlinks)
-        self.large_source_seen = True
-        if os.path.isdir(destination):
-            destination = os.path.join(destination, os.path.basename(source))
-        previous = self.previous_file(destination)
-        if previous is not None and self._reuse(source, previous, destination):
-            return destination
-        return shutil.copy2(source, destination, follow_symlinks=follow_symlinks)
 
     def _reuse(self, source, previous, destination):
         try:

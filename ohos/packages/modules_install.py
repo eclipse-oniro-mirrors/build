@@ -145,37 +145,39 @@ def copy_modules(system_install_info: dict, install_modules_info_file: str,
 
 
 def _create_module_symlinks(module_info, platform_installed_path, dests):
-    if 'symlink' in module_info:
-        symlink_dest = module_info.get('symlink')
-        for dest in dests:
-            symlink_src_file_path = os.path.join(platform_installed_path, dest)
-            for name in symlink_dest:
-                symlink_dest_dir = os.path.dirname(dest)
-                symlink_dest_file = os.path.join(platform_installed_path,
-                                                 symlink_dest_dir, name)
-                src_file_relpath = os.path.relpath(symlink_src_file_path, os.path.dirname(symlink_dest_file))
-                if not os.path.exists(os.path.dirname(symlink_dest_file)):
-                    os.makedirs(os.path.dirname(symlink_dest_file), exist_ok=True)
-                if not os.path.exists(symlink_dest_file):
-                    os.symlink(src_file_relpath, symlink_dest_file)
-                    module_info.setdefault("symlink_file", []).append(
-                        os.path.relpath(symlink_dest_file, platform_installed_path))
+    if 'symlink' not in module_info:
+        return
+    symlink_dest = module_info.get('symlink')
+    for dest in dests:
+        symlink_src_file_path = os.path.join(platform_installed_path, dest)
+        for name in symlink_dest:
+            symlink_dest_dir = os.path.dirname(dest)
+            symlink_dest_file = os.path.join(platform_installed_path,
+                                             symlink_dest_dir, name)
+            src_file_relpath = os.path.relpath(symlink_src_file_path, os.path.dirname(symlink_dest_file))
+            if not os.path.exists(os.path.dirname(symlink_dest_file)):
+                os.makedirs(os.path.dirname(symlink_dest_file), exist_ok=True)
+            if not os.path.exists(symlink_dest_file):
+                os.symlink(src_file_relpath, symlink_dest_file)
+                module_info.setdefault("symlink_file", []).append(
+                    os.path.relpath(symlink_dest_file, platform_installed_path))
 
 
 def _create_extended_symlinks(module_info, platform_installed_path, dests):
-    if 'symlink_ext' in module_info:
-        symlink_ext = module_info.get('symlink_ext')
-        for dest in dests:
-            symlink_src_file = os.path.join(platform_installed_path, dest)
-            for name in symlink_ext:
-                symlink_dest_file = os.path.join(platform_installed_path, dest.split('/')[0], name)
-                relpath = os.path.relpath(os.path.dirname(symlink_src_file), os.path.dirname(symlink_dest_file))
-                if not os.path.exists(os.path.dirname(symlink_dest_file)):
-                    os.makedirs(os.path.dirname(symlink_dest_file), exist_ok=True)
-                if not os.path.exists(symlink_dest_file):
-                    os.symlink(os.path.join(relpath, os.path.basename(dest)), symlink_dest_file)
-                    module_info.setdefault("symlink_file", []).append(
-                        os.path.relpath(symlink_dest_file, platform_installed_path))
+    if 'symlink_ext' not in module_info:
+        return
+    symlink_ext = module_info.get('symlink_ext')
+    for dest in dests:
+        symlink_src_file = os.path.join(platform_installed_path, dest)
+        for name in symlink_ext:
+            symlink_dest_file = os.path.join(platform_installed_path, dest.split('/')[0], name)
+            relpath = os.path.relpath(os.path.dirname(symlink_src_file), os.path.dirname(symlink_dest_file))
+            if not os.path.exists(os.path.dirname(symlink_dest_file)):
+                os.makedirs(os.path.dirname(symlink_dest_file), exist_ok=True)
+            if not os.path.exists(symlink_dest_file):
+                os.symlink(os.path.join(relpath, os.path.basename(dest)), symlink_dest_file)
+                module_info.setdefault("symlink_file", []).append(
+                    os.path.relpath(symlink_dest_file, platform_installed_path))
 
 
 def _create_path_symlink(module_info, platform_installed_path, dests):
@@ -191,30 +193,32 @@ def _create_path_symlink(module_info, platform_installed_path, dests):
 
 
 def _create_sdk_symlinks(module_info, platform_installed_path, dests):
-    # innerapi_tags create softlink for ndk、platformsdk
-    if "softlink_create_path" in module_info:
-        softlink_create_path = module_info.get("softlink_create_path")
-        for dest in dests:
-            replace_subdir = os.path.dirname(dest).split("/")[-1]
-            file_name = os.path.basename(dest)
-            dest_file = os.path.join(platform_installed_path, dest)
-            if replace_subdir in ["chipset-sdk", "chipset-sdk-sp"]:
-                if softlink_create_path == "ndk":
-                    link_path = dest_file.replace(f"{replace_subdir}/{file_name}", f"ndk/{file_name}")
-                else:
-                    link_path = dest_file.replace(f"{replace_subdir}/{file_name}", f"platformsdk/{file_name}")
-                if 'symlink' in module_info:
-                    actual_file_name = module_info.get("symlink")[0]
-                    link_path = link_path.replace(file_name, actual_file_name)
-                if link_path != dest_file:
-                    relative_path = os.path.relpath(os.path.dirname(dest_file), os.path.dirname(link_path))
-                    os.makedirs(os.path.dirname(link_path), exist_ok=True)
-                    src_file = os.path.join(relative_path, file_name)
-                    os.symlink(src_file, link_path)
-                    module_info.setdefault("symlink_file", []).append(
-                        os.path.relpath(link_path, platform_installed_path))
-                else:
-                    raise FileExistsError(f"{link_path} create failed, src_file:{dest_file} and {dest_file} is same")
+    # Keep the Native Development Kit (NDK) and platform SDK directory names.
+    if 'softlink_create_path' not in module_info:
+        return
+    softlink_create_path = module_info.get("softlink_create_path")
+    for dest in dests:
+        replace_subdir = os.path.dirname(dest).split("/")[-1]
+        file_name = os.path.basename(dest)
+        dest_file = os.path.join(platform_installed_path, dest)
+        if replace_subdir not in ["chipset-sdk", "chipset-sdk-sp"]:
+            continue
+        if softlink_create_path == "ndk":
+            link_path = dest_file.replace(f"{replace_subdir}/{file_name}", f"ndk/{file_name}")
+        else:
+            link_path = dest_file.replace(f"{replace_subdir}/{file_name}", f"platformsdk/{file_name}")
+        if 'symlink' in module_info:
+            actual_file_name = module_info.get("symlink")[0]
+            link_path = link_path.replace(file_name, actual_file_name)
+        if link_path != dest_file:
+            relative_path = os.path.relpath(os.path.dirname(dest_file), os.path.dirname(link_path))
+            os.makedirs(os.path.dirname(link_path), exist_ok=True)
+            src_file = os.path.join(relative_path, file_name)
+            os.symlink(src_file, link_path)
+            module_info.setdefault("symlink_file", []).append(
+                os.path.relpath(link_path, platform_installed_path))
+        else:
+            raise FileExistsError(f"{link_path} create failed, src_file:{dest_file} and {dest_file} is same")
 
 
 def _copy_directory_module(source, destination, source_is_file, copy_module_file):
