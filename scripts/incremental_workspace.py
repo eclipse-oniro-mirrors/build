@@ -952,6 +952,45 @@ def resolve_cached(path, cache):
     return Path(resolve_cached_string(path, cache))
 
 
+def continued_ninja_line(content, start):
+    """Do not interpret a continued command/value as a pool declaration."""
+    end = start - 2
+    if end >= 0 and content[end] == 13:
+        end -= 1
+    cursor = end
+    while cursor >= 0 and content[cursor] == 36:
+        cursor -= 1
+    return (end - cursor) % 2 == 1
+
+
+def graph_inventory_digest(content):
+    """Ignore only literal positive depths in standalone pool declarations."""
+    if not (content.startswith(b'pool ') or b'\npool ' in content):
+        return None
+    pattern = rb'(?m)(^pool [A-Za-z0-9_.:+/-]+\r?\n[ \t]+depth[ \t]*=[ \t]*)[1-9][0-9]*(?=[ \t]*\r?$)'
+    normalized = re.sub(pattern, lambda match: match[0] if continued_ninja_line(content, match.start())
+                        else match[1] + b'<pool-depth>', content)
+    return hashlib.sha256(normalized).hexdigest() if normalized != content else None
+
+
+def inventory_graph_record_equal(previous, current):
+    if previous['sha256'] == current['sha256']:
+        return True
+    identity = previous.get('inventory_v1_sha256')
+    return (isinstance(identity, str) and re.fullmatch('[0-9a-f]{64}', identity) is not None
+            and identity == current.get('inventory_v1_sha256'))
+
+
+def same_graph_bytes(previous, current):
+    return (previous is not None and current is not None and previous.keys() == current.keys()
+            and all(previous[name]['sha256'] == record['sha256'] for name, record in current.items()))
+
+
+def same_graph_inventory(previous, current):
+    return (previous is not None and current is not None and previous.keys() == current.keys()
+            and all(inventory_graph_record_equal(previous[name], record) for name, record in current.items()))
+
+
 def graph_content_records(root, build, previous, local):
     """Walk static Ninja include/subninja closure; unsupported syntax disables reuse.
 
@@ -992,6 +1031,12 @@ def graph_content_records(root, build, previous, local):
                 children.append(value)
             record = {'sha256': hashlib.sha256(content).hexdigest(),
                       'stat': signature, 'includes': children}
+            inventory_digest = graph_inventory_digest(content)
+            if inventory_digest is not None:
+                record['inventory_v1_sha256'] = inventory_digest
+                if (cached and cached['sha256'] != record['sha256']
+                        and inventory_graph_record_equal(cached, record)):
+                    phase(f'Ninja graph scheduling-only change: {relative}; dependency inventory unchanged')
         records[relative] = record
         pending.extend(os.path.abspath(os.path.join(build_base, value)) for value in record['includes'])
         if time.perf_counter() >= progress:
@@ -1001,8 +1046,8 @@ def graph_content_records(root, build, previous, local):
 
 
 def same_graph_content(old, new):
-    return (old is not None and new is not None and old.keys() == new.keys()
-            and all(old[name]['sha256'] == record['sha256'] for name, record in new.items()))
+    """Compare dependency inventory semantics; pool capacity is scheduling only."""
+    return same_graph_inventory(old, new)
 
 
 def collect_ninja_paths(root, build, tool, target='make_all', *, deps_metadata=None, reachable=None):
@@ -1660,7 +1705,8 @@ def ninja_deps_content_identity(path, expected_digest, *, snapshot_result=None):
 def ninja_deps_index_context(root, build, graph):
     if graph is None:
         return None
-    content = {name: record['sha256'] for name, record in graph.items()}
+    content = {name: record.get('inventory_v1_sha256', record['sha256'])
+               for name, record in graph.items()}
     return {'root': str(root), 'build_dir': str(build.relative_to(root)),
             'graph': hashlib.sha256(json.dumps(content, sort_keys=True,
                                                separators=(',', ':')).encode()).hexdigest(),
@@ -1854,6 +1900,7 @@ def capture(root, build, target, allow_dirty, manifest=None, automatic=False, *,
         collection['deps_outputs_index'] = deps_metadata['outputs_index']
     cache_started = time.perf_counter()
     unchanged_index = (local and not cache.get('clone_rebased') and same_graph and same_deps
+                       and same_graph_bytes(cache.get('graph'), graph)
                        and same_scope
                        and 'deps_content_sha256' in cache
                        and cache.get('deps_sha256') == deps_digest
