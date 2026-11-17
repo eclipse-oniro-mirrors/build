@@ -75,15 +75,175 @@ def _write_arm64e_module_info(path, modules, optional_output):
         os.unlink(path)
 
 
+def _strip_toolchain(label: str) -> str:
+    """Strip the GN toolchain suffix from a label.
+
+    A label may look like:
+        "//path/to:target(//build/toolchain/ohos:ohos_clang_arm64)"
+    Returns the label without the parenthesised toolchain part:
+        "//path/to:target"
+    This normalises both whitelist entries and runtime labels so the
+    whitelist matches regardless of which toolchain produced the module.
+    """
+    if not label:
+        return label
+    idx = label.find("(//")
+    if idx != -1 and label.endswith(")"):
+        return label[:idx]
+    return label
+
+
+def _load_collision_whitelist(whitelist_file: str, depfiles: list) -> set:
+    """Load install collision whitelist
+
+    The file is a JSON list of objects, each with:
+        "dest": the install destination path (e.g. "system/bin/foo")
+        "owner": the label that first installed the path
+        "overwrite": the label that is allowed to overwrite it
+
+    Labels may be written with or without a toolchain suffix; both are
+    normalised via _strip_toolchain so the whitelist is toolchain-agnostic.
+    Leading '/' in dest is stripped to match the runtime install path format.
+    Returns a set of (dest, owner, overwrite) tuples. Returns an empty set
+    if the file is not provided or empty.
+    """
+    whitelist = set()
+    if not whitelist_file:
+        return whitelist
+    data = read_json_file(whitelist_file)
+    if data is None:
+        return whitelist
+    depfiles.append(whitelist_file)
+    for entry in data:
+        dest = entry.get("dest")
+        if dest and dest.startswith('/'):
+            dest = dest[1:]
+        dest = os.path.normpath(dest) if dest else dest
+        owner = _strip_toolchain(entry.get("owner"))
+        overwrite = _strip_toolchain(entry.get("overwrite"))
+        if dest and owner and overwrite:
+            whitelist.add((dest, owner, overwrite))
+        else:
+            print("WARN: skipping malformed whitelist entry: {}".format(entry))
+    return whitelist
+
+
+def _resolve_collision(path: str, owner: str, overwrite: str, collision_whitelist: set,
+                       collision_scan: bool, scanned_collisions: list) -> None:
+    """Resolve a detected install path collision based on the check mode.
+
+    Args:
+        path: relative install path (e.g. "system/bin/foo")
+        owner: normalised label that first installed the path
+        overwrite: normalised label that wants to overwrite it
+        collision_whitelist: set of (dest, owner, overwrite) tuples
+        collision_scan: if True, record collision instead of raising
+        scanned_collisions: list to append scan-mode collision to
+
+    Raises Exception on non-whitelisted collision in block mode.
+    """
+    is_whitelisted = (path, owner, overwrite) in collision_whitelist
+    if collision_scan:
+        if not is_whitelisted:
+            scanned_collisions.append({
+                "dest": path,
+                "owner": owner,
+                "overwrite": overwrite,
+            })
+    elif is_whitelisted:
+        print("WARN: allowed install path collision: '{}' "
+              "owned by '{}', overwritten by '{}'".format(path, owner, overwrite))
+    else:
+        raise Exception(
+            "install path collision: '{}' already installed by '{}', "
+            "now '{}' wants to overwrite it.\n"
+            "To allow this override, add the following entry to the "
+            "install collision whitelist:\n"
+            '  {{"dest": "{}", "owner": "{}", "overwrite": "{}"}}'.format(
+                path, owner, overwrite, path, owner, overwrite))
+
+
+def _check_install_collision(path: str, label: str, dest_owner: dict, collision_whitelist: set,
+                             collision_scan: bool, scanned_collisions: list) -> None:
+    """Check an install path for collision, then register the first installer as owner.
+
+    Works for both file dest paths and symlink_file paths. If the path was
+    previously installed by a different module, delegates to _resolve_collision
+    to handle the collision (warn / raise / record). The first installer is
+    registered as owner via setdefault — subsequent installers at the same path
+    are always checked against the original owner, not the last writer, so
+    whitelist entries are stable regardless of installation order.
+
+    Args:
+        path: relative install path (e.g. "system/bin/foo")
+        label: GN label of the module installing this path
+        dest_owner: dict mapping path -> normalised label that first installed it
+        collision_whitelist: set of (dest, owner, overwrite) tuples
+        collision_scan: if True, record collision instead of raising
+        scanned_collisions: list to append scan-mode collision to
+    """
+    norm_label = _strip_toolchain(label)
+    norm_path = os.path.normpath(path)
+    owner = dest_owner.get(norm_path)
+    if owner is not None and owner != norm_label:
+        _resolve_collision(norm_path, owner, norm_label, collision_whitelist,
+                           collision_scan, scanned_collisions)
+    dest_owner.setdefault(norm_path, norm_label)
+
+
+def _check_install_paths(source: str, dest: str, label: str, dest_owner: dict,
+                         collision_whitelist: set, collision_scan: bool,
+                         scanned_collisions: list) -> None:
+    if os.path.isfile(source):
+        _check_install_collision(dest, label, dest_owner,
+                                 collision_whitelist, collision_scan,
+                                 scanned_collisions)
+        return
+    for root, _, filenames in os.walk(source):
+        for filename in filenames:
+            relpath = os.path.relpath(os.path.join(root, filename), source)
+            _check_install_collision(os.path.join(dest, relpath), label,
+                                     dest_owner, collision_whitelist,
+                                     collision_scan, scanned_collisions)
+
+
+class CollisionContext:
+    """Holds collision detection state across the module installation loop.
+
+    Tracks which module first installed each path, the whitelist of allowed
+    overrides, and collected collisions for scan-mode reporting.
+    """
+
+    def __init__(self, whitelist: set, scan: bool):
+        self.label = None
+        self.dest_owner = {}
+        self.whitelist = whitelist
+        self.scan = scan
+        self.scanned = []
+
+    def set_label(self, label: str):
+        self.label = label
+
+    def check_path(self, path: str):
+        _check_install_collision(path, self.label, self.dest_owner,
+                                 self.whitelist, self.scan, self.scanned)
+
+    def check_paths(self, source: str, dest: str):
+        _check_install_paths(source, dest, self.label, self.dest_owner,
+                             self.whitelist, self.scan, self.scanned)
+
+
 def copy_modules(system_install_info: dict, install_modules_info_file: str,
                  modules_info_file: str, module_list_file: str, arm64e_modules_info_file: str,
                  arm64e_whitelist_file: str, post_process_modules_info_files: list, platform_installed_path: str,
                  host_toolchain, is_host_product: bool, additional_system_files: dict,
-                 depfiles: list, categorized_libraries: dict, *,
-                 arm64e_output_optional=False):
+                 depfiles: list, categorized_libraries: dict,
+                 collision_whitelist: set = None, enable_collision_check: bool = False, collision_scan: bool = False,
+                 *, arm64e_output_optional=False):
     output_result = []
     arm64e_output_result = []
     dest_list = []
+    collision_ctx = CollisionContext(collision_whitelist or set(), collision_scan) if enable_collision_check else None
 
     modules_info_dict = _get_modules_info(system_install_info, depfiles)
     for value in modules_info_dict.values():
@@ -123,6 +283,8 @@ def copy_modules(system_install_info: dict, install_modules_info_file: str,
             continue
         # copy module lib
         label = module_info.get('label')
+        if collision_ctx:
+            collision_ctx.set_label(label)
         if not is_host_product and label and host_toolchain in label:
             continue
         source = module_info.get('source')
@@ -132,12 +294,12 @@ def copy_modules(system_install_info: dict, install_modules_info_file: str,
             raise Exception("source '{}' doesn't exist.".format(source))
         depfiles.append(source)
         _copy_module_destinations(source, dests, platform_installed_path,
-                                  dest_list, copy_functions)
+                                  dest_list, copy_functions, collision_ctx)
 
-        _create_module_symlinks(module_info, platform_installed_path, dests)
-        _create_extended_symlinks(module_info, platform_installed_path, dests)
+        _create_module_symlinks(module_info, platform_installed_path, dests, collision_ctx)
+        _create_extended_symlinks(module_info, platform_installed_path, dests, collision_ctx)
         _create_path_symlink(module_info, platform_installed_path, dests)
-        _create_sdk_symlinks(module_info, platform_installed_path, dests)
+        _create_sdk_symlinks(module_info, platform_installed_path, dests, collision_ctx)
 
     # write install module info to file
     write_json_file(install_modules_info_file, modules_info_dict)
@@ -152,8 +314,10 @@ def copy_modules(system_install_info: dict, install_modules_info_file: str,
     _write_arm64e_module_info(arm64e_modules_info_file, arm64e_output_result,
                              arm64e_output_optional)
 
+    return collision_ctx.scanned if collision_ctx else []
 
-def _create_module_symlinks(module_info, platform_installed_path, dests):
+
+def _create_module_symlinks(module_info, platform_installed_path, dests, collision_ctx=None):
     if 'symlink' not in module_info:
         return
     symlink_dest = module_info.get('symlink')
@@ -163,6 +327,8 @@ def _create_module_symlinks(module_info, platform_installed_path, dests):
             symlink_dest_dir = os.path.dirname(dest)
             symlink_dest_file = os.path.join(platform_installed_path,
                                              symlink_dest_dir, name)
+            if collision_ctx:
+                collision_ctx.check_path(os.path.join(symlink_dest_dir, name))
             src_file_relpath = os.path.relpath(symlink_src_file_path, os.path.dirname(symlink_dest_file))
             if not os.path.exists(os.path.dirname(symlink_dest_file)):
                 os.makedirs(os.path.dirname(symlink_dest_file), exist_ok=True)
@@ -172,7 +338,7 @@ def _create_module_symlinks(module_info, platform_installed_path, dests):
                     os.path.relpath(symlink_dest_file, platform_installed_path))
 
 
-def _create_extended_symlinks(module_info, platform_installed_path, dests):
+def _create_extended_symlinks(module_info, platform_installed_path, dests, collision_ctx=None):
     if 'symlink_ext' not in module_info:
         return
     symlink_ext = module_info.get('symlink_ext')
@@ -180,6 +346,8 @@ def _create_extended_symlinks(module_info, platform_installed_path, dests):
         symlink_src_file = os.path.join(platform_installed_path, dest)
         for name in symlink_ext:
             symlink_dest_file = os.path.join(platform_installed_path, dest.split('/')[0], name)
+            if collision_ctx:
+                collision_ctx.check_path(os.path.join(dest.split('/')[0], name))
             relpath = os.path.relpath(os.path.dirname(symlink_src_file), os.path.dirname(symlink_dest_file))
             if not os.path.exists(os.path.dirname(symlink_dest_file)):
                 os.makedirs(os.path.dirname(symlink_dest_file), exist_ok=True)
@@ -201,7 +369,7 @@ def _create_path_symlink(module_info, platform_installed_path, dests):
             raise FileNotFoundError(f"target symlink {dest_file} to {symlink_path} create failed")
 
 
-def _create_sdk_symlinks(module_info, platform_installed_path, dests):
+def _create_sdk_symlinks(module_info, platform_installed_path, dests, collision_ctx=None):
     # Keep the Native Development Kit (NDK) and platform SDK directory names.
     if 'softlink_create_path' not in module_info:
         return
@@ -220,12 +388,15 @@ def _create_sdk_symlinks(module_info, platform_installed_path, dests):
             actual_file_name = module_info.get("symlink")[0]
             link_path = link_path.replace(file_name, actual_file_name)
         if link_path != dest_file:
+            if collision_ctx:
+                collision_ctx.check_path(os.path.relpath(link_path, platform_installed_path))
             relative_path = os.path.relpath(os.path.dirname(dest_file), os.path.dirname(link_path))
             os.makedirs(os.path.dirname(link_path), exist_ok=True)
             src_file = os.path.join(relative_path, file_name)
-            os.symlink(src_file, link_path)
-            module_info.setdefault("symlink_file", []).append(
-                os.path.relpath(link_path, platform_installed_path))
+            if not os.path.exists(link_path):
+                os.symlink(src_file, link_path)
+                module_info.setdefault("symlink_file", []).append(
+                    os.path.relpath(link_path, platform_installed_path))
         else:
             raise FileExistsError(f"{link_path} create failed, src_file:{dest_file} and {dest_file} is same")
 
@@ -244,11 +415,13 @@ def _copy_directory_module(source, destination, source_is_file, copy_module_file
 
 
 def _copy_module_destinations(source, dests, platform_installed_path,
-                              dest_list, copy_functions):
+                              dest_list, copy_functions, collision_ctx=None):
     source_is_file, copy_module_file = copy_functions
     for dest in dests:
         if dest.startswith('/'):
             dest = dest[1:]
+        if collision_ctx:
+            collision_ctx.check_paths(source, dest)
         dest_list.append(dest)
         # dest_dir_prefix
         if source_is_file(source):
@@ -295,6 +468,17 @@ def parse_arguments():
     parser.add_argument('--post-process-modules-info-files',
                         nargs='*',
                         default=[])
+    parser.add_argument('--install-collision-whitelist', default='',
+                        help="JSON file listing allowed install path"
+                        " collision. Each entry: "
+                        '{"dest": "...", "owner": "...", "overwrite": "..."}.')
+    parser.add_argument('--install-collision-check', choices=['off', 'block', 'scan'], default='off',
+                        help="Install path collision check mode"
+                        " (off=legacy behaviour, block=fail build on unwhitelisted collision,"
+                        " scan=collect collisions into JSON report without failing).")
+    parser.add_argument('--install-collision-scan-file', default='',
+                        help="Output JSON file for collision scan report."
+                        " Required when --install-collision-check=scan.")
     args = parser.parse_args()
     if args.incremental_copy_cache and not args.completion_stamp:
         parser.error('--incremental-copy-cache requires --completion-stamp')
@@ -331,14 +515,30 @@ def _perform_install(args, prepared):
 
     print('copy modules...')
     categorized_libraries = load_categorized_libraries(args.categorized_libraries)
-    copy_modules(system_install_info, args.install_modules_info_file,
+    collision_whitelist = set()
+    _collision_enabled = args.install_collision_check != "off"
+    _collision_scan = args.install_collision_check == "scan"
+    if _collision_enabled:
+        collision_whitelist = _load_collision_whitelist(args.install_collision_whitelist, depfiles)
+    scanned_collisions = copy_modules(system_install_info, args.install_modules_info_file,
                  args.modules_info_file, args.modules_list_file,
                  args.arm64e_modules_info_file, args.arm64e_whitelist_file,
                  args.post_process_modules_info_files,
                  args.platform_installed_path, args.host_toolchain,
                  is_host_product, additional_system_files, depfiles,
                  categorized_libraries,
+                 collision_whitelist, _collision_enabled, _collision_scan,
                  arm64e_output_optional=bool(args.completion_stamp))
+    if _collision_scan:
+        if not args.install_collision_scan_file:
+            raise Exception("--install-collision-scan-file is required when --install-collision-check=scan")
+        scan_report = {
+            "collision_count": len(scanned_collisions),
+            "collisions": scanned_collisions
+        }
+        write_json_file(args.install_collision_scan_file, scan_report)
+        print("install collision scan: {} collision(s) written to '{}'".format(
+            len(scanned_collisions), args.install_collision_scan_file))
 
     _finish_installation(args, depfiles, sa_files)
     return 0
