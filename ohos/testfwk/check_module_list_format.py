@@ -15,13 +15,15 @@
 
 """Allow native generation only for the exact validated Python serializer."""
 import hashlib
+import os
 from pathlib import Path
 import sys
 
 
 def main(arguments):
     try:
-        supported = hashlib.sha256(Path(arguments[0]).read_bytes()).hexdigest() == arguments[1]
+        supported = (os.access(arguments[0], os.X_OK) and
+                     hashlib.sha256(Path(arguments[0]).read_bytes()).hexdigest() == arguments[1])
     except OSError:
         supported = False
     print('true' if supported else 'false')

@@ -244,9 +244,11 @@ template("ohos_unittest") {
     if (defined(invoker.rtti_compile_flag) && invoker.rtti_compile_flag) {
       external_deps += [ "googletest:gtest_rtti_main" ]
     } else {
+      # Preserve the existing static-library link order.
+      # NOSORT
       external_deps += [
-        "googletest:gtest",
         "googletest:gtest_main",
+        "googletest:gtest",
       ]
     }
   }
