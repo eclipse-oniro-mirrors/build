@@ -7,5 +7,6 @@
 ../../scripts/util/file_utils.py
 ../../scripts/util/md5_check.py
 ../../scripts/util/pycache.py
+install_copy_reuse.py
 modules_install.py
 rules/categorized_libraries_utils.py
