@@ -154,6 +154,8 @@ class OHOSBuildModule(BuildModuleInterface):
         self._run_phase(BuildPhase.TARGET_COMPILATION)
         if not self.args_dict.get("build_only_load").arg_value and not self.args_dict.get("build_only_gn").arg_value:
             LogUtil.set_stage("[NINJA]")
+            from scripts.optional_input_state import prepare_optional_inputs
+            prepare_optional_inputs(sys.argv[2:])
             self.target_compiler.run()
             LogUtil.clear_stage()
 
