@@ -11,11 +11,12 @@
 # limitations under the License.
 """Validate installed tools locally or restore a verified workspace snapshot.
 
-Host metadata accelerates hashing only within the same boot/workspace/HOME.
+Host metadata accelerates hashing only on the same boot and backing directories.
 Portable decisions use relative names, contents, permissions and link targets.
 No user configuration or credentials are archived.
 """
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 import gzip
 import hashlib
 import io
@@ -86,8 +87,11 @@ def identity(root, home):
     def directory(path):
         info = path.stat()
         return [str(path.resolve()), info.st_dev, info.st_ino]
+    # Relocation may recreate the HOME parent on tmpfs while binding these
+    # package directories unchanged. Only their backing identities matter.
     return [Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
-            directory(root), directory(home)]
+            directory(root), [str(home.resolve()), directory(home / '.ohpm'),
+                              directory(home / '.hvigor')]]
 
 
 def signature(info):
@@ -127,8 +131,9 @@ class Inventory:
             elif stat.S_ISDIR(before.st_mode):
                 row['kind'] = 'directory'
                 directories.append((path, signature(before)))
-                pending.extend((child, str(child.relative_to(root)))
-                               for child in sorted(path.iterdir(), reverse=True))
+                prefix = '' if name == '.' else name + '/'
+                pending.extend((path / child, prefix + child)
+                               for child in sorted(os.listdir(path), reverse=True))
             elif stat.S_ISREG(before.st_mode):
                 previous = self.cached.get(key, {})
                 digest = previous.get('sha256') if previous.get('stat') == signature(before) else None
@@ -147,6 +152,27 @@ class Inventory:
                 raise ValueError('Initialization directory changed during validation')
         return rows
 
+    def trees(self, roots):
+        workers = min(8, max(1, len(roots)))
+        tasks = [(tag, path, {key: value for key, value in self.cached.items()
+                              if key.startswith(tag + '/')}) for tag, path in roots.items()]
+        result = {}
+        # Tree traversal also does Python metadata work; use processes so
+        # independent trees do not contend on the interpreter lock.
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for tag, rows, stats, hashed_bytes in pool.map(scan_tree, tasks):
+                result[tag] = rows
+                self.stats.update(stats)
+                self.hashed_bytes += hashed_bytes
+        return result
+
+
+def scan_tree(item):
+    tag, path, cached = item
+    inventory = Inventory(cached)
+    rows = inventory.tree(path, tag)
+    return tag, rows, inventory.stats, inventory.hashed_bytes
+
 
 def npm_root(entry):
     entry = entry.resolve(strict=True)
@@ -160,7 +186,7 @@ def npm_root(entry):
     raise ValueError('Cannot identify a bounded npm package directory')
 
 
-def context(root, home, inventory):
+def tool_roots(root):
     if os.environ.get('NODE_PATH') or any(
             value == '-r' or value.startswith(('--require', '--import', '--loader', '--experimental-loader'))
             for value in shlex.split(os.environ.get('NODE_OPTIONS', ''))):
@@ -171,7 +197,15 @@ def context(root, home, inventory):
     roots = {'node': Path(node).resolve(strict=True), 'npm': npm_root(Path(npm)),
              'ohpm': root / 'prebuilts/tool/command-line-tools/ohpm',
              'entry': root / 'build/build_scripts/build.sh', 'helper': Path(__file__)}
-    tools = {name: inventory.tree(path, 'tools/' + name) for name, path in roots.items()}
+    return roots
+
+
+def context(root, home, inventory, roots=None, tools=None):
+    roots = tool_roots(root) if roots is None else roots
+    if tools is None:
+        scanned = inventory.trees({'tools/' + name: path for name, path in roots.items()})
+        tools = {name: scanned['tools/' + name] for name in roots}
+
     def normalize(value):
         for path, marker in sorted([(str(root), '<workspace>'), (str(home), '<home>')],
                                    key=lambda item: len(item[0]), reverse=True):
@@ -184,7 +218,7 @@ def context(root, home, inventory):
                    or (key.startswith('NODE_') and key != 'NODE_HOME')}
     configs = {'user-npm': home / '.npmrc', 'user-ohpm': home / '.ohpm/.ohpmrc',
                'project-npm': root / '.npmrc', 'system-npm': Path('/etc/npmrc'),
-               'global-npm': Path(node).resolve().parent.parent / 'etc/npmrc'}
+               'global-npm': roots['node'].parent.parent / 'etc/npmrc'}
     file_variables = {'npm_config_userconfig', 'npm_config_globalconfig', 'npm_config_cafile',
                       'node_extra_ca_certs'}
     for key, value in os.environ.items():
@@ -192,6 +226,13 @@ def context(root, home, inventory):
             configs['env-' + key.lower()] = Path(value)
         if key.lower() == 'npm_config_prefix' and value:
             configs['prefix-npm'] = Path(value) / 'etc/npmrc'
+    follow_configuration_references(configs, normalize)
+    hashes = {name: sha_file(path) if path.is_file() else None for name, path in configs.items()}
+    return {'host': [platform.system(), platform.machine(), list(platform.libc_ver())],
+            'tools': tools, 'environment': sha_bytes(encoded(environment)), 'configuration': hashes}
+
+
+def follow_configuration_references(configs, normalize):
     # npmrc may redirect user/global configuration or CA files. Read those
     # bounded files too; never promote an executable ancestor to a scan root.
     pending = list(configs.items())
@@ -214,14 +255,12 @@ def context(root, home, inventory):
             if key.strip().lower() == 'prefix':
                 candidate = candidate / 'etc/npmrc'
             tag = 'referenced-' + normalize(str(candidate))
-            if tag not in configs:
-                configs[tag] = candidate
-                # Certificates are data, not recursively parsed npmrc files.
-                if key.strip().lower() != 'cafile':
-                    pending.append((tag, candidate))
-    hashes = {name: sha_file(path) if path.is_file() else None for name, path in configs.items()}
-    return {'host': [platform.system(), platform.machine(), list(platform.libc_ver())],
-            'tools': tools, 'environment': sha_bytes(encoded(environment)), 'configuration': hashes}
+            if tag in configs:
+                continue
+            configs[tag] = candidate
+            # Certificates are data, not recursively parsed npmrc files.
+            if key.strip().lower() != 'cafile':
+                pending.append((tag, candidate))
 
 
 def require_packages(home, projects=True):
@@ -246,17 +285,39 @@ def require_packages(home, projects=True):
 
 def payload(home, inventory):
     require_packages(home)
-    return {tag: inventory.tree(home / relative, 'payload/' + tag) for tag, relative in LAYOUT.items()}
+    scanned = inventory.trees({'payload/' + tag: home / relative for tag, relative in LAYOUT.items()})
+    return {tag: scanned['payload/' + tag] for tag in LAYOUT}
 
 
 def scan(root, home, previous=None):
     instance = identity(root, home)
     cached = previous.get('stats') if isinstance(previous, dict) and previous.get('instance') == instance else None
     inventory = Inventory(cached)
-    result = {'version': VERSION, 'instance': instance, 'context': context(root, home, inventory),
-              'payload': payload(home, inventory)}
+    roots = tool_roots(root)
+    require_packages(home)
+    plan = {'tools/' + name: path for name, path in roots.items()}
+    plan.update({'payload/' + tag: home / relative for tag, relative in LAYOUT.items()})
+    scanned = inventory.trees(plan)
+    tools = {name: scanned['tools/' + name] for name in roots}
+    packages = {tag: scanned['payload/' + tag] for tag in LAYOUT}
+    result = {'version': VERSION, 'instance': instance,
+              'context': context(root, home, inventory, roots=roots, tools=tools), 'payload': packages}
     result['stats'] = inventory.stats
     return result, inventory.hashed_bytes
+
+
+def matching_context(current, previous):
+    # The validator source is proof bookkeeping. VERSION and the verified
+    # package/tool/configuration contents define installation compatibility.
+    # Updating the validator must not reinstall unchanged packages.
+    def installation(value):
+        if not isinstance(value, dict) or not isinstance(value.get('tools'), dict):
+            return None
+        tools = {name: rows for name, rows in value['tools'].items() if name != 'helper'}
+        return dict(value, tools=tools)
+
+    expected = installation(previous)
+    return expected is not None and installation(current) == expected
 
 
 def check(root, home):
@@ -264,7 +325,7 @@ def check(root, home):
     if not isinstance(previous, dict) or previous.get('version') != VERSION:
         return False
     current, hashed = scan(root, home, previous)
-    if current['context'] != previous.get('context') or current['payload'] != previous.get('payload'):
+    if not matching_context(current['context'], previous.get('context')) or current['payload'] != previous.get('payload'):
         return False
     if current != previous:
         write_json(local_path(home), current)
@@ -369,9 +430,9 @@ def extract_payload(path, destination, expected):
     for path, mode in reversed(directories):
         path.chmod(mode)
     inventory = Inventory()
-    for tag in LAYOUT:
-        if inventory.tree(destination / tag, 'verify/' + tag) != expected[tag]:
-            raise ValueError('Restored package tree differs from snapshot')
+    restored = inventory.trees({'verify/' + tag: destination / tag for tag in LAYOUT})
+    if any(restored['verify/' + tag] != expected[tag] for tag in LAYOUT):
+        raise ValueError('Restored package tree differs from snapshot')
 
 
 def restore(root, home):
@@ -380,7 +441,7 @@ def restore(root, home):
     if not isinstance(data, dict) or data.get('version') != VERSION or set(data.get('payload', {})) != set(LAYOUT):
         return False
     inventory = Inventory()
-    if context(root, home, inventory) != data.get('context'):
+    if not matching_context(context(root, home, inventory), data.get('context')):
         return False
     name = data.get('archive', '')
     if not re.fullmatch(r'payload-[0-9a-f]{64}\.tar\.gz', name):
@@ -436,7 +497,7 @@ def restore(root, home):
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(expected)
             current, _ = scan(root, home)
-            if current['context'] != data['context'] or current['payload'] != data['payload']:
+            if not matching_context(current['context'], data['context']) or current['payload'] != data['payload']:
                 raise ValueError('Initialization changed during restoration')
             write_json(local_path(home), current)
         except (OSError, ValueError, RuntimeError):
