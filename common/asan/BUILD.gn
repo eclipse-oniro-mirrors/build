@@ -21,9 +21,11 @@ ohos_prebuilt_shared_library("libclang_rt.asan.so") {
   deps = [ ":asan_unstripped_copy" ]
   install_images = [
     "system",
-    "ramdisk",
     "updater",
   ]
+  if (is_asan) {
+    install_images += [ "ramdisk" ]
+  }
   subsystem_name = "build"
   part_name = "build_framework"
 }
