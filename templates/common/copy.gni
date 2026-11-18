@@ -222,11 +222,31 @@ template("ohos_copy") {
     _stable_directory_copy =
         defined(invoker.stable_directory_copy) && invoker.stable_directory_copy
     if (_stable_directory_copy) {
-      _copy_type = "action"
       _payload_target = "${_main_target_name}__directory_payload"
       _payload_state =
           get_label_info(":${_main_target_name}", "target_out_dir") +
           "/${_main_target_name}.copy.json"
+      _payload_publication =
+          get_label_info(":${_main_target_name}", "target_out_dir") +
+          "/${_main_target_name}.copy.publication.json"
+      _copy_plan = {
+        version = 1
+        state = rebase_path(_payload_state, root_build_dir)
+        publication = rebase_path(_payload_publication, root_build_dir)
+        stamp = rebase_path(
+                get_label_info(":${_main_target_name}", "target_out_dir") +
+                    "/${_payload_target}.stamp",
+                root_build_dir)
+        roots =
+            rebase_path(process_file_template(invoker.sources, invoker.outputs),
+                        root_build_dir)
+      }
+      write_file("$root_build_dir/.directory_copy_plans/" +
+                     rebase_path(get_label_info(":${_main_target_name}",
+                                                "target_out_dir"),
+                                 root_build_dir) + "/${_main_target_name}.json",
+                 _copy_plan,
+                 "json")
       action(_payload_target) {
         forward_variables_from(invoker, [ "testonly" ])
         script = "//build/scripts/copy_directory_outputs.py"
@@ -236,6 +256,7 @@ template("ohos_copy") {
             [
               "$target_out_dir/${_main_target_name}.copy.payload.complete",
               _payload_state,
+              _payload_publication,
             ] + process_file_template(invoker.sources, invoker.outputs)
         depfile = "$target_gen_dir/${_main_target_name}.copy.d"
         args = [
@@ -246,6 +267,11 @@ template("ohos_copy") {
           rebase_path(_payload_state, root_build_dir),
           "--depfile",
           rebase_path(depfile, root_build_dir),
+          "--publication",
+          rebase_path(_payload_publication, root_build_dir),
+          "--published-state",
+          rebase_path("$target_out_dir/${_main_target_name}.copy.complete",
+                      root_build_dir),
         ]
         if (defined(invoker.stable_directory_copy_preserve)) {
           foreach(_preserved, invoker.stable_directory_copy_preserve) {
@@ -292,14 +318,10 @@ template("ohos_copy") {
                                "rust_crate_type",
                              ])
       if (_stable_directory_copy) {
-        script = "//build/scripts/copy_directory_outputs.py"
-        inputs = [ _payload_state ]
+        # Native copy edges order their producer dependencies without treating
+        # a shared directory's aggregate stamp as a content dependency.
+        sources = [ _payload_publication ]
         outputs = [ "$target_out_dir/${target_name}.copy.complete" ]
-        args = [
-          "--publish-state",
-          rebase_path(_payload_state, root_build_dir),
-          rebase_path(outputs[0], root_build_dir),
-        ]
         if (defined(public_deps)) {
           public_deps += [ ":${_payload_target}" ]
         } else {

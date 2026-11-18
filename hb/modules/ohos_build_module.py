@@ -153,6 +153,9 @@ class OHOSBuildModule(BuildModuleInterface):
     def _target_compilation(self):
         self._run_phase(BuildPhase.TARGET_COMPILATION)
         if not self.args_dict.get("build_only_load").arg_value and not self.args_dict.get("build_only_gn").arg_value:
+            from resources.global_var import CURRENT_OHOS_ROOT
+            from scripts.copy_directory_outputs import prepare_registered_roots
+            prepare_registered_roots(CURRENT_OHOS_ROOT, sys.argv[2:])
             LogUtil.set_stage("[NINJA]")
             self.target_compiler.run()
             LogUtil.clear_stage()
