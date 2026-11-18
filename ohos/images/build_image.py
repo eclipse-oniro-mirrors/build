@@ -24,6 +24,7 @@ sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__)))))
 from scripts.util import build_utils
+from scripts.optional_input_state import update_state  # noqa: E402
 from build_scripts.build import find_top  # noqa: E402
 
 
@@ -166,7 +167,11 @@ def main(argv):
     parser.add_argument('--target-cpu', required=False)
     parser.add_argument('--output-stamp', required=False,
                         help='Completion output for an optional image')
+    parser.add_argument('--optional-input-state')
     args = parser.parse_args(argv)
+    if args.optional_input_state:
+        update_state(args.optional_input_state,
+                     [args.input_path, args.device_image_config_file])
 
     if os.path.exists(args.output_image_path):
         os.remove(args.output_image_path)
@@ -193,11 +198,14 @@ def main(argv):
         # Directory entries detect newly installed files and the transition
         # from an absent optional input to a real image. Track a present image
         # too, so removing it schedules the original image generation again.
-        for path in (args.input_path, args.device_image_config_file):
-            parent = os.path.dirname(os.path.abspath(path))
-            while not os.path.isdir(parent):
-                parent = os.path.dirname(parent)
-            _dep_files.append(parent)
+        if args.optional_input_state:
+            _dep_files.append(args.optional_input_state)
+        else:
+            for path in (args.input_path, args.device_image_config_file):
+                parent = os.path.dirname(os.path.abspath(path))
+                while not os.path.isdir(parent):
+                    parent = os.path.dirname(parent)
+                _dep_files.append(parent)
         if os.path.isdir(args.input_path) and not os.path.isfile(args.output_image_path):
             raise RuntimeError('Image generation completed without its output: ' +
                                args.output_image_path)

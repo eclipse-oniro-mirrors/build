@@ -22,6 +22,7 @@ sys.path.append(
         os.path.abspath(__file__)))))
 from scripts.util.file_utils import read_json_file, write_json_file  # noqa: E402
 from scripts.util import build_utils  # noqa: E402
+from scripts.optional_input_state import update_state  # noqa: E402
 
 
 def binary_install_subsystem(dist_parts_info_file: str,
@@ -61,7 +62,10 @@ def main():
     parser.add_argument('--parts-src-installed-info-file', required=True)
     parser.add_argument('--binary-installed-info-file', required=True)
     parser.add_argument('--depfile', required=False)
+    parser.add_argument('--optional-input-state')
     args = parser.parse_args()
+    if args.optional_input_state:
+        update_state(args.optional_input_state, [args.dist_parts_info_file])
 
     required_parts = binary_install_subsystem(
         args.dist_parts_info_file, args.parts_src_installed_info_file)
@@ -74,15 +78,20 @@ def main():
         # its nearest existing parent so creating it still invalidates this
         # action, without treating an absent optional file as perpetually dirty.
         dist_dependency = os.path.abspath(args.dist_parts_info_file)
-        while not os.path.exists(dist_dependency):
-            dist_dependency = os.path.dirname(dist_dependency)
-        _dep_files.append(dist_dependency)
+        if args.optional_input_state:
+            _dep_files.append(args.optional_input_state)
+            if os.path.exists(dist_dependency):
+                _dep_files.append(dist_dependency)
+        else:
+            while not os.path.exists(dist_dependency):
+                dist_dependency = os.path.dirname(dist_dependency)
+            _dep_files.append(dist_dependency)
         _dep_files.append(args.parts_src_installed_info_file)
         build_utils.write_depfile(args.depfile,
-                                 args.binary_installed_info_file,
-                                 _dep_files,
-                                 add_pydeps=False,
-                                 relative_inputs=True)
+                                  args.binary_installed_info_file,
+                                  _dep_files,
+                                  add_pydeps=False,
+                                  relative_inputs=True)
     return 0
 
 

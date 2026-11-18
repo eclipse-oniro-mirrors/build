@@ -355,6 +355,29 @@ foreach(_platform, target_platform_list) {
           "--output-stamp",
           rebase_path(outputs[0], root_build_dir),
         ]
+        if (build_framework_enable_incremental_build) {
+          _optional_state = "$root_build_dir/.incremental/optional-inputs/" +
+                            rebase_path(target_gen_dir, root_build_dir) +
+                            "/${target_name}.json"
+          _optional_plan = {
+            version = 1
+            state = rebase_path(_optional_state, root_build_dir)
+            paths = rebase_path([
+                                  image_input_path,
+                                  device_image_config_file,
+                                ],
+                                root_build_dir)
+          }
+          write_file("$root_build_dir/.optional_input_plans/" +
+                         rebase_path(target_gen_dir, root_build_dir) +
+                         "/${target_name}.json",
+                     _optional_plan,
+                     "json")
+          args += [
+            "--optional-input-state",
+            rebase_path(_optional_state, root_build_dir),
+          ]
+        }
       }
     }
   }

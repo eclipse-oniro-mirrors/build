@@ -157,6 +157,8 @@ class OHOSBuildModule(BuildModuleInterface):
             from scripts.copy_directory_outputs import prepare_registered_roots
             prepare_registered_roots(CURRENT_OHOS_ROOT, sys.argv[2:])
             LogUtil.set_stage("[NINJA]")
+            from scripts.optional_input_state import prepare_optional_inputs
+            prepare_optional_inputs(sys.argv[2:])
             self.target_compiler.run()
             LogUtil.clear_stage()
 
