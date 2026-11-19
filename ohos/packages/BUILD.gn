@@ -24,6 +24,19 @@ import("//build/ohos/hisysevent/hisysevent.gni")
 # import target_platform_list
 import("${build_configs_path}/platforms_list.gni")
 product_path = product_build_config.product_path
+
+declare_args() {
+  # Install path collision check mode for modules_install.py.
+  # Tri-state switch
+  #   "off" (default): no collision check, legacy behaviour.
+  #   "block"        : unwhitelisted collisions fail the build.
+  #   "scan"         : collect all non-whitelisted collisions into a JSON report
+  # Pass via gn args, e.g.:
+  #   ./build.sh --gn-args "install_collision_check=block"
+  #   ./build.sh --gn-args "install_collision_check=scan"
+  install_collision_check = "off"
+}
+
 yml_file = rebase_path(product_path) + "/fs.yml"
 is_exist_yml_file = exec_script(rebase_path("//build/ohos/file_exists.py"),
                                 [
@@ -386,6 +399,42 @@ foreach(_platform, target_platform_list) {
     args +=
         [ rebase_path("//build/ohos/packages/rules/categorized-libraries.json",
                       root_build_dir) ]
+
+    if (install_collision_check != "off") {
+      args += [
+        "--install-collision-check",
+        install_collision_check,
+      ]
+
+      # Priority: product-specific whitelist in out/products_ext/ first,
+      # fall back to the default whitelist in build/.
+      _product_ext_whitelist =
+          "//out/products_ext/install_collision_whitelist.json"
+      _default_whitelist = "//build/install_collision_whitelist.json"
+      if (path_exists(_product_ext_whitelist)) {
+        sources += [ _product_ext_whitelist ]
+        args += [
+          "--install-collision-whitelist",
+          rebase_path(_product_ext_whitelist, root_build_dir),
+        ]
+      } else if (path_exists(_default_whitelist)) {
+        sources += [ _default_whitelist ]
+        args += [
+          "--install-collision-whitelist",
+          rebase_path(_default_whitelist, root_build_dir),
+        ]
+      }
+      if (install_collision_check == "scan") {
+        # scan mode: collect all collisions into a JSON report instead of failing the build.
+        _install_collision_scan_file =
+            "${current_platform_dir}/install_collision_scan.json"
+        outputs += [ _install_collision_scan_file ]
+        args += [
+          "--install-collision-scan-file",
+          rebase_path(_install_collision_scan_file, root_build_dir),
+        ]
+      }
+    }
   }
 
   action("check_seccomp_filter_name") {
