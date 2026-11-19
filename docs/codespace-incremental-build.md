@@ -56,13 +56,13 @@ bwrap --version
 `x86_64_virt`：
 
 ```bash
-./build.sh --product-name x86_64_virt --ccache
+./build.sh --product-name x86_64_virt
 ```
 
 `wukong100`：
 
 ```bash
-./build.sh --product-name wukong100 --ccache
+./build.sh --product-name wukong100
 ```
 
 这是日常完整产品构建命令。已有配套产物时，构建系统会按依赖增量执行，并非每次都从零编译所有文件。
@@ -74,13 +74,13 @@ bwrap --version
 `x86_64_virt`：
 
 ```bash
-./build.sh --product-name x86_64_virt --ccache --fast-rebuild
+./build.sh --product-name x86_64_virt --fast-rebuild
 ```
 
 `wukong100`：
 
 ```bash
-./build.sh --product-name wukong100 --ccache --fast-rebuild
+./build.sh --product-name wukong100 --fast-rebuild
 ```
 
 适用于已有成功构建状态，且仅修改 CPP 等源码、构建配置保持不变的情况。`--fast-rebuild` 会跳过部分构建准备和 GN 生成阶段，继续复用已有构建图。
@@ -100,13 +100,13 @@ bwrap --version
 `x86_64_virt`：
 
 ```bash
-./build.sh --product-name x86_64_virt --ccache --build-target <模块目标>
+./build.sh --product-name x86_64_virt --build-target <模块目标>
 ```
 
 `wukong100`：
 
 ```bash
-./build.sh --product-name wukong100 --ccache --build-target <模块目标>
+./build.sh --product-name wukong100 --build-target <模块目标>
 ```
 
 将 `<模块目标>` 替换为实际构建目标，执行时不要保留尖括号。目标应来自对应的 `BUILD.gn`，不能直接把子系统名当作目标。
