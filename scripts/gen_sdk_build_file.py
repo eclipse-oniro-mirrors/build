@@ -48,6 +48,13 @@ ohos_maple_java_prebuilt("%s") {
 '''
 
 
+def copy_file_overwrite(src: str, dst: str):
+    if os.path.exists(dst):
+        os.remove(dst)
+    shutil.copy(src, dst)
+    os.chmod(dst, 0o644)
+
+
 # check sdk header file signature,
 # skip check if file dir not exist
 def check_header_files(checkfile_dir: str, subsystem_sdk_dir: str, subsystem_name: str,
@@ -126,7 +133,9 @@ def gen_build_file(input_file: str, sdk_out_dir: str, generate_sig: bool,
         if module_type == "maple":
             pass
         else:
-            shutil.copy(source, module_sdk_out_dir)
+            copy_file_overwrite(
+                source, os.path.join(module_sdk_out_dir,
+                                     os.path.basename(source)))
 
         # copy headers file
         header_base = module_desc.get('header_base')
@@ -145,7 +154,7 @@ def gen_build_file(input_file: str, sdk_out_dir: str, generate_sig: bool,
             if not os.path.exists(header_file_dest_dir):
                 os.makedirs(header_file_dest_dir, exist_ok=True)
 
-            shutil.copy(rel_h_file, header_file_dest)
+            copy_file_overwrite(rel_h_file, header_file_dest)
 
         # generate or check header files
         if module_type == 'so' and generate_sig is False:
@@ -172,7 +181,9 @@ def gen_build_file(input_file: str, sdk_out_dir: str, generate_sig: bool,
             sdk_mplts = []
             base_dir = os.path.basename(module_sdk_out_dir)
             for mplt in bc_mplts:
-                shutil.copy(mplt, module_sdk_out_dir)
+                copy_file_overwrite(mplt, 
+                                    os.path.join(module_sdk_out_dir,
+                                    os.path.basename(mplt)))
                 sdk_mplts.append(os.path.join(base_dir,
                                               os.path.basename(mplt)))
 
@@ -181,7 +192,9 @@ def gen_build_file(input_file: str, sdk_out_dir: str, generate_sig: bool,
             bc_jar_path = build_utils.parse_and_flatten_gn_lists(bc_jar_path)
             sdk_jar_path = []
             for jar in bc_jar_path:
-                shutil.copy(jar, module_sdk_out_dir)
+                copy_file_overwrite(jar, 
+                                    os.path.join(module_sdk_out_dir,
+                                                 os.path.basename(jar)))
                 sdk_jar_path.append(
                     os.path.join(base_dir, os.path.basename(jar)))
             build_file_content += MAPLE_BUILD_TEMPLATE % (
@@ -249,3 +262,4 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
