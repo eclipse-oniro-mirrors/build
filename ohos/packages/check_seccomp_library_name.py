@@ -60,6 +60,7 @@ def collect_seccomp_services_name(lib_dir: str):
         'system',
         'app',
         'nwebspawn',
+        'subspawn',
         'imf_secure_mode',
         'app_privilege',
         'app_atomic',
