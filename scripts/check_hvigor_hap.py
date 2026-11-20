@@ -35,10 +35,13 @@ def check_sdk_version(args, hvigor_compile_hap_allow_info):
     sdk_allow_version_list = hvigor_compile_hap_allow_info.get("sdk_version")
     check_instance(sdk_allow_version_list, "sdk_version", dict)
 
+    if not args.whitelist_prefix or not args.sdk_home.startswith(args.whitelist_prefix):
+        return 0
+    
     message = "The hap path name: '{}' use the sdk version: '{}', but it is not exist in whitelist, please check target: '{}'".format(args.target_path, args.sdk_home, args.hvigor_compile_hap_allow_file)
 
     if args.sdk_home not in sdk_allow_version_list:
-        return 0
+        raise Exception(message)
 
     if args.target_path not in sdk_allow_version_list.get(args.sdk_home):
         raise Exception(message)
@@ -53,10 +56,13 @@ def check_hvigor_version(args, hvigor_compile_hap_allow_info):
     hvigor_allow_version_list = hvigor_compile_hap_allow_info.get("hvigor_version")
     check_instance(hvigor_allow_version_list, "hvigor_version", dict)
 
+    if not args.whitelist_prefix or not args.hvigor_home.startswith(args.whitelist_prefix):
+        return 0
+    
     message = "The hap path name: '{}' use the hvigor version: '{}', but it is not exist in whitelist, please check target: '{}'".format(args.target_path, args.hvigor_home, args.hvigor_compile_hap_allow_file)
     
     if args.hvigor_home not in hvigor_allow_version_list:
-        return 0
+        raise Exception(message)
 
     if args.target_path not in hvigor_allow_version_list.get(args.hvigor_home):
         raise Exception(message)
@@ -72,6 +78,7 @@ def main():
     parser.add_argument('--sdk-home', help='sdk home')
     parser.add_argument('--hvigor-home', help='hvigor home')
     parser.add_argument('--depfile', required=False)
+    parser.add_argument('--whitelist-prefix', default='', help="whitelist path prefix to check")
     args = parser.parse_args()
 
     # read hvigor compile hap allow list file
