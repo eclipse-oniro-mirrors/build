@@ -1139,6 +1139,17 @@
         ]
     },
     {
+        "install_dir": "ets/dynamic/build-tools",
+        "module_label": "//interface/sdk-js:ohos_ets_extension_blocklist",
+        "target_os": [
+            "windows",
+            "linux",
+            "darwin",
+            "ohos",
+            "linux_arm64"
+        ]
+    },
+    {
         "install_dir": "toolchains",
         "module_label": "//arkcompiler/runtime_core/disassembler:ark_disasm",
         "target_os": [
