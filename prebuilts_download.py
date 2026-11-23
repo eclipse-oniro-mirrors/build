@@ -23,7 +23,7 @@ import importlib
 import time
 import pathlib
 import re
-from multiprocessing import cpu_count
+from multiprocessing import cpu_count, Process, Queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from urllib.request import urlopen
@@ -171,7 +171,7 @@ def _is_system_component() -> bool:
 def _hwcloud_download(args, config: dict, bin_dir: str, code_dir: str, glibc_version: str):
     try:
         cnt = cpu_count()
-    except Exception as e:
+    except:
         cnt = 1
     with ThreadPoolExecutor(max_workers=cnt) as pool:
         tasks = dict()
@@ -224,31 +224,63 @@ def _hwcloud_download(args, config: dict, bin_dir: str, code_dir: str, glibc_ver
                 print('{}, download and decompress completed'.format(tasks.get(task)))
 
 
+def _hwcloud_download_with_timeout(args, config: list, bin_dir: str, code_dir: str, glibc_version: str,
+                                   timeout: int = 1000):
+    def download_task():
+        _hwcloud_download(args, config, bin_dir, code_dir, glibc_version)
+
+    while True:
+        process = Process(target=download_task)
+        process.start()
+        process.join(timeout)
+
+        if process.is_alive():
+            print("Download process timed out. Restarting...")
+            process.terminate()
+            process.join()
+        else:
+            break
+
+
 @build_tracker(
     event_name="_npm_install",
     build_type="prebuild",
     args_key="args",
 )
-def _npm_install(args):
+def _npm_install(args, clear_npm_cache):
     node_path = 'prebuilts/build-tools/common/nodejs/current/bin'
     os.environ['PATH'] = '{}/{}:{}'.format(args.code_dir, node_path, os.environ.get('PATH'))
     npm = os.path.join(args.code_dir, node_path, 'npm')
+    if clear_npm_cache:
+        out, err, retcode = _run_cmd(f'rm -rf ~/.npm/_cacache')
+        if retcode == 0:
+            print(f"delete ~/.npm/_cacache success")
+        else:
+            print(f"delete ~/.npm/_cacache failed")
     if args.skip_ssl:
         skip_ssl_cmd = '{} config set strict-ssl false;'.format(npm)
         out, err, retcode = _run_cmd(skip_ssl_cmd)
         if retcode != 0:
+            print(f"execute skip ssl cmd failed, reason is: {err.decode()}")
             return False, err.decode()
     npm_clean_cmd = '{} cache clean -f'.format(npm)
     npm_package_lock_cmd = '{} config set package-lock true'.format(npm)
     out, err, retcode = _run_cmd(npm_clean_cmd)
     if retcode != 0:
+        print(f"execute cache clean cmd failed, reason is: {err.decode()}")
         return False, err.decode()
     out, err, retcode = _run_cmd(npm_package_lock_cmd)
     if retcode != 0:
+        print(f"execute config set package-lock failed, reason is: {err.decode()}")
         return False, err.decode()
     install_cmds = []
     full_code_paths = []
-            
+
+    # List of repositiories that are optional (won't raise exception if missing)
+    optional_repositories = [
+        'developtools/ace_ets2bundle',
+        'arkcompiler/runtime_core'  # already handled in original code
+    ]
     print('start npm install, please wait.')
     for install_info in args.npm_install_config:
         full_code_path = os.path.join(args.code_dir, install_info)
@@ -258,6 +290,14 @@ def _npm_install(args):
         basename = os.path.basename(full_code_path)
         node_modules_path = os.path.join(full_code_path, "node_modules")
         npm_cache_dir = os.path.join('~/.npm/_cacache', basename)
+
+        # Skip if the path is in optional repositories and doesn't exist
+        is_optional = install_info in optional_repositories
+        if not os.path.exists(full_code_path):
+            if is_optional:
+                print(f"Warning: The directory {full_code_path} does not exist but is optional. Skipping...")
+            continue
+
         if os.path.exists(node_modules_path):
             print('remove node_modules %s' % node_modules_path)
             _run_cmd(('rm -rf {}'.format(node_modules_path)))
@@ -323,16 +363,21 @@ def _do_rename(config_info: dict, code_dir: str, host_platform: str, host_cpu: s
     dest_dir = code_dir + config_info.get('dest')
     symlink_src = config_info.get('symlink_src')
     symlink_dest = config_info.get('symlink_dest')
+    symlink_src_dir = src_dir + symlink_src
     if os.path.exists(dest_dir) and dest_dir != src_dir:
         shutil.rmtree(dest_dir)
     shutil.move(src_dir, dest_dir)
-    if symlink_src and symlink_dest and os.path.exists(src_dir + symlink_src):
+    if os.path.exists(symlink_src_dir) and symlink_src and symlink_dest:
         if os.path.exists(dest_dir + symlink_dest) and os.path.islink(dest_dir + symlink_dest):
             os.unlink(dest_dir + symlink_dest)
         if os.path.exists(dest_dir + symlink_dest) and os.path.isfile(dest_dir + symlink_dest):
             os.remove(dest_dir + symlink_dest)
         if os.path.exists(dest_dir + symlink_dest) and os.path.isdir(dest_dir + symlink_dest):
             shutil.rmtree(dest_dir + symlink_dest)
+        if host_platform == 'darwin' and os.path.basename(dest_dir) == "nodejs":
+            symlink_src = symlink_src.replace('linux', 'darwin')
+        if host_platform == 'linux' and host_cpu == 'arm64' and os.path.basename(dest_dir) == "nodejs":
+            symlink_src = symlink_src.replace('linux-x64', 'linux-aarch64')
         os.symlink(os.path.basename(symlink_src), dest_dir + symlink_dest)
 
 
@@ -430,8 +475,10 @@ def main():
     glibc_version = args.glibc_version
     tool_repo = args.tool_repo
     if args.build_arkuix:
+        print("build arkui")
         config_file = os.path.join(args.code_dir, 'build_plugins/prebuilts_download_config.json')
     elif args.config_file:
+        print("config_file")
         config_file = args.config_file
     else:
         raise Exception("No prebuilts download configuration file specified.")
@@ -448,27 +495,38 @@ def main():
     if not os.path.exists(args.bin_dir):
         os.makedirs(args.bin_dir, exist_ok=True)
     copy_config = _build_copy_config(config_info, host_platform, host_cpu)
-    if args.disable_rich:
-        _hwcloud_download(args, copy_config, args.bin_dir, args.code_dir, glibc_version)
+    print(f"copy_config:{copy_config}")
+    if not copy_config:
+        print("nothing to download")
     else:
-        args.progress = _import_rich_module()
-        with args.progress:
-            _hwcloud_download(args, copy_config, args.bin_dir, args.code_dir, glibc_version)
 
+        if args.disable_rich:
+            _hwcloud_download(args, copy_config, args.bin_dir, args.code_dir, glibc_version)
+        else:
+            args.progress = _import_rich_module()
+            with args.progress:
+                _hwcloud_download(args, copy_config, args.bin_dir, args.code_dir, glibc_version)
+        print('download finished')
+    print("start _file_handle")
     _file_handle(file_handle_config, args.code_dir, args.host_platform, host_cpu)
+    print("end _file_handle")
     install_config = config_info.get(host_platform).get(host_cpu).get('install')
     retry_times = 0
     max_retry_times = 2
+    clear_npm_cache = False
     args.success_installed = []
     args.parallel_install = True
     while retry_times <= max_retry_times:
-        result, error = _npm_install(args)
+        print('npm install try times:', retry_times + 1)
+        if retry_times >= 1:
+            clear_npm_cache = True
+        result, error = _npm_install(args, clear_npm_cache)
         if result:
+            print("npm install successful")
             break
-        print("npm install error, error info: %s" % error)
-        args.parallel_install = False
-        if retry_times == max_retry_times:
+        elif retry_times == max_retry_times:
             for error_info in error.split('\n'):
+                print("npm install error, error info: %s" % error)
                 if error_info.endswith('debug.log'):
                     log_path = error_info.split()[-1]
                     cmd = ['cat', log_path]

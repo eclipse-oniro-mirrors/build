@@ -71,6 +71,12 @@ def check_sha256(remote_url: str, local_file: str) -> bool:
 
     remote_sha256 = get_remote_sha256(remote_url)
     local_sha256 = file_sha256(local_file)
+    if remote_sha256 != local_sha256:
+        print(
+            "remote file {}.sha256 is not found, begin check SHASUM256.txt".format(
+                remote_url
+            )
+        )
 
     return remote_sha256 == local_sha256
 
@@ -79,7 +85,7 @@ def get_remote_sha256(remote_url: str) -> str:
     """
     从远程.sha256文件中获取哈希值
     """
-
+    start_time = time.time()
     with _cache_lock:  # 加锁检查缓存
         if remote_url in remote_sha256_cache:
             return remote_sha256_cache[remote_url]
@@ -105,6 +111,11 @@ def get_remote_sha256(remote_url: str) -> str:
 
     with _cache_lock:  # 加锁更新缓存
         remote_sha256_cache[remote_url] = remote_sha256
+
+    endtime = time.time()
+    cost_time = endtime - start_time
+    remote_file_name = os.path.basename(remote_url)
+    print(f"get remote sha256 {remote_file_name} end, cost time: {cost_time}")
 
     return remote_sha256
 
@@ -169,11 +180,13 @@ def extract_compress_files_and_gen_mark(source_file: str, unzip_dir: str, mark_f
         command = ["tar", "-xvf", source_file, "-C", unzip_dir]
     else:
         print("source file is:", source_file)
-        raise Exception(f"暂不支持解压此类型压缩文件！")
+        print(f"暂不支持解压此类型压缩文件！")
+        return
     
     _, err, retcode = run_cmd(command)
     if retcode != 0:
-        raise Exception(f"解压失败，错误信息：{err}")
+        print(f"解压失败，错误信息：{err}")
+        return
     else:
         flag = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
         mode = stat.S_IWUSR | stat.S_IRUSR
