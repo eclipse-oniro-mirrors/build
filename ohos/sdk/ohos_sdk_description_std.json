@@ -1952,5 +1952,16 @@
             "linux",
             "linux_arm64"
         ]
+    },
+    {
+        "install_dir": "toolchains/deduplistcheck",
+        "module_label": "//third_party/musl/so_dedup:copy_deduplist_json",
+        "target_os": [
+            "linux",
+            "windows",
+            "darwin",
+            "ohos",
+            "linux_arm64"
+        ]
     }
 ]
