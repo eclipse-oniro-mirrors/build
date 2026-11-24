@@ -12,7 +12,7 @@ import sys
 
 
 def main():
-    print(cpu_count)
+    print(get_cpu_count())
     return 0
 
 
