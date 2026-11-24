@@ -108,7 +108,6 @@ if (!use_current_sdk) {
       "${platform_version}",
       "--sdk-build-public",
       "${sdk_build_public}",
-      "--skip-version-macro",
     ]
   }
 
@@ -257,8 +256,8 @@ ohos_ndk_copy("ndk_cmake_files") {
   dest_dir = "$ndk_os_irrelevant_out_dir/build/cmake"
   sources = [
     "./cmake/ohos.toolchain.cmake",
-    "./cmake/sdk_native_platforms.cmake",
     "./cmake/ohos_lite_flags.cmake",
+    "./cmake/sdk_native_platforms.cmake",
   ]
 }
 
