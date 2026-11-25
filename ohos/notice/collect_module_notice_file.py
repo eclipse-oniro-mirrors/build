@@ -101,7 +101,7 @@ def get_license_from_readme(readme_path: str):
             raise Exception("Error: Version Number of notice file is empty in {}.".format(
                 readme_path))
 
-        return [os.path.join(os.path.dirname(readme_path), notice_file) for file in notice_files], notice_name, notice_version
+        return [os.path.join(os.path.dirname(readme_path), notice_file) for notice_file in notice_files], notice_name, notice_version
     else:
         notice_files = []
         notice_names = []

@@ -202,7 +202,7 @@ def generate_xml_notice_files(files_with_same_hash: dict, input_dir: str,
             stripped_filename = re.sub('.txt.*', '',
                                        os.path.relpath(filename, input_dir))
             write_file(
-                output_file, '<file-name content_id="%s">%s</file-name>' %
+                output_file, '<file-name contentId="%s">%s</file-name>' %
                              (id_table.get(filename), stripped_filename))
 
         write_file(output_file, '')
@@ -219,7 +219,7 @@ def generate_xml_notice_files(files_with_same_hash: dict, input_dir: str,
             with open(filename, errors='ignore') as temp_file_hd:
                 write_file(
                     output_file,
-                    '<file-content content_id="{}"><![CDATA[{}]]></file-content>'
+                    '<file-content contentId="{}"><![CDATA[{}]]></file-content>'
                         .format(file_key, get_entity(temp_file_hd.read())))
             write_file(output_file, '')
 
