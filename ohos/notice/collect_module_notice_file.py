@@ -232,7 +232,7 @@ def write_notice_to_output(notice_file, output):
                    'r', encoding='utf-8', errors='ignore') as output_data_flow:
         output_file_content = output_data_flow.read()
     if license_content not in output_file_content:
-        with os.fdopen(os.open(output, os.O_RDWR | os.O_CREAT | os.O_TRUNC, stat.S_IWUSR | stat.S_IRUSR),
+        with os.fdopen(os.open(output, os.O_RDWR | os.O_CREAT, stat.S_IWUSR | stat.S_IRUSR),
                        'a', encoding='utf-8') as testfwk_info_file:
             testfwk_info_file.write(f"{license_content}\n")
             testfwk_info_file.close()
