@@ -52,7 +52,6 @@ def copy_file_overwrite(src: str, dst: str):
     if os.path.exists(dst):
         os.remove(dst)
     shutil.copy(src, dst)
-    os.chmod(dst, 0o644)
 
 
 # check sdk header file signature,
