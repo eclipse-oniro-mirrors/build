@@ -332,11 +332,10 @@ class VarParser:
                 if new_value is not original_value:  # 仅当original_value为字符串时成立
                     data[k] = new_value
         elif isinstance(data, list):
-            for i in range(len(data)):
-                original_value = data[i]
+            for index, original_value in enumerate(data):
                 new_value = cls.parse_vars(original_value, dictionary)
                 if new_value is not original_value:
-                    data[i] = new_value
+                    data[index] = new_value
         else:
             return data
         return data

@@ -101,7 +101,7 @@ def get_license_from_readme(readme_path: str):
             raise Exception("Error: Version Number of notice file is empty in {}.".format(
                 readme_path))
 
-        return [os.path.join(os.path.dirname(readme_path), notice_file) for file in notice_files], notice_name, notice_version
+        return [os.path.join(os.path.dirname(readme_path), notice_file) for notice_file in notice_files], notice_name, notice_version
     else:
         notice_files = []
         notice_names = []
@@ -232,7 +232,7 @@ def write_notice_to_output(notice_file, output):
                    'r', encoding='utf-8', errors='ignore') as output_data_flow:
         output_file_content = output_data_flow.read()
     if license_content not in output_file_content:
-        with os.fdopen(os.open(output, os.O_RDWR | os.O_CREAT | os.O_TRUNC, stat.S_IWUSR | stat.S_IRUSR),
+        with os.fdopen(os.open(output, os.O_RDWR | os.O_CREAT, stat.S_IWUSR | stat.S_IRUSR),
                        'a', encoding='utf-8') as testfwk_info_file:
             testfwk_info_file.write(f"{license_content}\n")
             testfwk_info_file.close()
